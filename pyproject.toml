@@ -1,0 +1,42 @@
+[project]
+name = "btsnoop-parser"
+version = "0.2.0"
+description = "Parse and explore Bluetooth HCI btsnoop captures from Android devices."
+authors = [{ name = "Kranthi", email = "kdevprofile@gmail.com" }]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.9"
+keywords = ["bluetooth", "btsnoop", "hci", "android", "parser"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: System :: Networking",
+    "Topic :: Utilities",
+]
+dependencies = []
+
+[project.scripts]
+btsnoop_parser = "btsnoop_parser.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/krathi/btsnoop-parser"
+Repository = "https://github.com/krathi/btsnoop-parser"
+Issues = "https://github.com/krathi/btsnoop-parser/issues"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["btsnoop_parser*"]
