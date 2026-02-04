@@ -174,6 +174,21 @@ def iter_records(
 
         try:
             ts = _ts_from_btsnoop(timestamp)
+
+            # --- Heuristic Fix for "Future" Timestamps (Android Bug) ---
+            # Some Android versions record timestamps offset by ~378 days (1 year + 13 days).
+            # This is likely due to an epoch mixup (Julian vs Gregorian or 0000 vs 0001).
+            # If the timestamp is significantly in the future (> 30 days from now),
+            # we check if subtracting 378 days makes it "current".
+            now = _dt.datetime.now(_dt.timezone.utc)
+            if ts > now + _dt.timedelta(days=30):
+                # 378 days = 32,659,200 seconds
+                ts_corrected = ts - _dt.timedelta(days=378)
+                # If the corrected time is within the last year, assume it's the bug and fix it.
+                if now - _dt.timedelta(days=365) < ts_corrected < now + _dt.timedelta(days=1):
+                    ts = ts_corrected
+            # -----------------------------------------------------------
+
         except Exception as exc:
             LOG.error("Skipping record with invalid timestamp %s: %s", timestamp, exc)
             continue
