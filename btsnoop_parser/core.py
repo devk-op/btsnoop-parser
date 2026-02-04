@@ -145,8 +145,8 @@ def iter_records(
 
     version, datalink = struct.unpack(">II", data[8:16])
     LOG.debug("Parsed BTSnoop header: version=%s datalink=%s", version, datalink)
-    if datalink != 1001:
-        LOG.warning("Unexpected datalink value %s (expected 1001 for HCI H4)", datalink)
+    if datalink not in (1001, 1002):
+        LOG.warning("Unexpected datalink value %s (expected 1001 or 1002 for HCI H4)", datalink)
 
     offset = 16
     index = 0
