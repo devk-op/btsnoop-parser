@@ -61,10 +61,11 @@ class CaptureStats:
             
             # Disconnection Complete (0x05)
             # Payload: Status (1), Handle (2), Reason (1)
-            if event_code == 0x05 and len(payload) >= 5:
-                status = payload[1]
-                handle = payload[2] | (payload[3] << 8)
-                reason = payload[4]
+            # Struct: [Event(0), Len(1), Status(2), HandleLSB(3), HandleMSB(4), Reason(5)]
+            if event_code == 0x05 and len(payload) >= 6:
+                status = payload[2]
+                handle = payload[3] | (payload[4] << 8)
+                reason = payload[5]
                 reason_str = HCI_ERROR_CODES.get(reason, f"0x{reason:02X}")
                 
                 # If reason is normal, it's just a log. If it's a timeout/error, it's an issue.
@@ -87,24 +88,28 @@ class CaptureStats:
                      })
 
             # Command Complete (0x0E) - check for non-zero status
-            # Payload: Num_HCI (1), Opcode (2), Returns... (Status is usually first byte of Returns)
+            # Struct: [Event(0), Len(1), NumHCI(2), OpcodeLSB(3), OpcodeMSB(4), ReturnParams...(5)]
             elif event_code == 0x0E and len(payload) >= 6:
-                # num_hci = payload[1]
-                opcode = payload[2] | (payload[3] << 8)
-                status = payload[4]
-                if status != 0x00:
-                    err_str = HCI_ERROR_CODES.get(status, f"0x{status:02X}")
-                    self.issues.append({
-                         "timestamp": ts,
-                         "level": "ERROR",
-                         "title": "Command Failure",
-                         "detail": f"Opcode 0x{opcode:04X} failed with status {err_str}"
-                     })
+                # num_hci = payload[2]
+                opcode = payload[3] | (payload[4] << 8)
+                # Status is usually the first return parameter at index 5
+                # But some commands don't return status. However, most failure items do.
+                if len(payload) > 5:
+                    status = payload[5]
+                    if status != 0x00:
+                        err_str = HCI_ERROR_CODES.get(status, f"0x{status:02X}")
+                        self.issues.append({
+                             "timestamp": ts,
+                             "level": "ERROR",
+                             "title": "Command Failure",
+                             "detail": f"Opcode 0x{opcode:04X} failed with status {err_str}"
+                         })
 
             # Command Status (0x0F) - check for non-zero status
-            elif event_code == 0x0F and len(payload) >= 5:
-                status = payload[1]
-                opcode = payload[3] | (payload[4] << 8)
+            # Struct: [Event(0), Len(1), Status(2), NumHCI(3), OpcodeLSB(4), OpcodeMSB(5)]
+            elif event_code == 0x0F and len(payload) >= 6:
+                status = payload[2]
+                opcode = payload[4] | (payload[5] << 8)
                 if status != 0x00:
                     err_str = HCI_ERROR_CODES.get(status, f"0x{status:02X}")
                     self.issues.append({
@@ -115,10 +120,12 @@ class CaptureStats:
                      })
             
             # Connection Complete (0x03) - check for failure
-            elif event_code == 0x03 and len(payload) >= 12:
-                status = payload[1]
-                handle = payload[2] | (payload[3] << 8)
-                bd_addr = ":".join(f"{x:02X}" for x in payload[4:10][::-1])
+            # Struct: [Event(0), Len(1), Status(2), HandleLSB(3), HandleMSB(4), BD_ADDR(6 bytes)...]
+            elif event_code == 0x03 and len(payload) >= 13:
+                status = payload[2]
+                handle = payload[3] | (payload[4] << 8)
+                # Address is 6 bytes at 5..10 inclusive (slice 5:11)
+                bd_addr = ":".join(f"{x:02X}" for x in payload[5:11][::-1])
                 self._track_device(bd_addr)
                 
                 if status != 0x00:
