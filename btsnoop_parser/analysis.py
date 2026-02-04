@@ -183,7 +183,9 @@ class CaptureStats:
             print(f"\n{BOLD}Potential Issues ({len(self.issues)}):{RESET}")
             for issue in self.issues:
                 color = RED if issue["level"] in ("ERROR", "CRITICAL") else YELLOW
-                t_str = issue["timestamp"].strftime("%H:%M:%S.%f")[:-3]
+                # Convert to local time and include date for context
+                local_ts = issue["timestamp"].astimezone()
+                t_str = local_ts.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                 print(f"  {color}[{issue['level']}] {t_str} - {issue['title']}{RESET}: {issue['detail']}")
         else:
             print(f"\n{BOLD}{GREEN}No obvious issues detected.{RESET}")
@@ -193,5 +195,6 @@ class CaptureStats:
             for d in self.disconnects:
                 reason = d["reason"]
                 color = RED if d["is_error"] else GREEN
-                t_str = d["timestamp"].strftime("%H:%M:%S.%f")[:-3]
+                local_ts = d["timestamp"].astimezone()
+                t_str = local_ts.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                 print(f"  {t_str} Handle {d['handle']} -> {color}{reason}{RESET}")
