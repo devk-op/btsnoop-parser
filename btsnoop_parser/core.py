@@ -213,6 +213,7 @@ def print_table(
     records: Sequence[Mapping[str, object]],
     *,
     limit: Optional[int] = None,
+    color: bool = True,
     file=None,
 ) -> None:
     """Render a Wireshark-like summary table to stdout or the provided file object."""
@@ -221,6 +222,13 @@ def print_table(
 
         file = sys.stdout
 
+    # ANSI Colors
+    RESET = "\033[0m"
+    DIM = "\033[2m"
+    BLUE = "\033[34m"   # Host -> Controller
+    GREEN = "\033[32m"  # Controller -> Host
+    RED = "\033[31m"    # Errors
+    
     header = f"{'No.':<5} {'Time':<10} {'Source':<11} {'Destination':<12} {'Protocol':<10} Info"
     print(header, file=file)
 
@@ -230,17 +238,32 @@ def print_table(
             break
 
         count += 1
-        src = "host" if record["direction"] == "TX" else "controller"
-        dst = "controller" if record["direction"] == "TX" else "host"
+        direction = str(record["direction"])
+        src = "host" if direction == "TX" else "controller"
+        dst = "controller" if direction == "TX" else "host"
+        
+        # Colorize Source/Dest based on direction
+        c_dir = BLUE if direction == "TX" else GREEN
+        if not color:
+            c_dir = ""
+            RESET = ""
+            RED = ""
+        
         proto_name = str(record.get("packet_type_name") or _proto_name(record["packet_type"]))  # type: ignore[index]
         proto = ("HCI_" + proto_name.split()[0]).ljust(10)
+        
         info = _decode_info(
             int(record["packet_type"]),  # type: ignore[arg-type]
             record["packet_data"],  # type: ignore[index]
-            str(record["direction"]),
+            direction,
         )
+        
+        # Highlight errors (naive check for 'Status' and non-zero)
+        # _decode_info currently doesn't return status, so we rely on info text if it mentions failure? 
+        # Actually better to rely on parsing logic, but for simple table view: maintain simple colors.
+        
         print(
-            f"{record['index']:<5} {record['delta']:.6f} {src:<11} {dst:<12} {proto} {info}",
+            f"{record['index']:<5} {record['delta']:.6f} {c_dir}{src:<11} {dst:<12}{RESET} {proto} {info}",
             file=file,
         )
 

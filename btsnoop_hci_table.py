@@ -5,7 +5,7 @@ import datetime
 import struct
 import json
 import csv
-from typing import Iterable, Dict, Any, Optional, Set, Tuple, List
+from typing import Iterable, Any, Optional
 
 BTSNOOP_HEADER = b'btsnoop\0'
 # μs between 0001-01-01 and 1970-01-01 (btsnoop epoch → Unix epoch)
@@ -74,7 +74,7 @@ CMD_NAMES = {
 
 def ts_from_btsnoop(timestamp_us: int) -> datetime.datetime:
     unix_us = timestamp_us - BTSNOOP_EPOCH_DELTA_US
-    return datetime.datetime.utcfromtimestamp(unix_us / 1_000_000)
+    return datetime.datetime.fromtimestamp(unix_us / 1_000_000, datetime.timezone.utc).replace(tzinfo=None)
 
 def proto_name_from_type(ptype: int) -> str:
     return HCI_PACKET_TYPES.get(ptype, f"Unknown (0x{ptype:02X})")
@@ -89,9 +89,9 @@ def bdaddr_to_str_le(b: bytes) -> str:
         return "??:??:??:??:??:??"
     return ":".join(f"{x:02X}" for x in b[::-1])
 
-def parse_le_advertising_data(ad: bytes) -> Dict[int, bytes]:
+def parse_le_advertising_data(ad: bytes) -> dict[int, bytes]:
     """Parse LE Advertising data (AD structures). Returns dict type->value."""
-    out: Dict[int, bytes] = {}
+    out: dict[int, bytes] = {}
     i = 0
     while i < len(ad):
         length = ad[i]
@@ -136,15 +136,15 @@ def decode_info(ptype: int, payload: bytes, direction: str) -> str:
 
 # ───────────────────────── parsing ─────────────────────────
 
-def parse_records(filename: str) -> Iterable[Dict[str, Any]]:
+def parse_records(filename: str) -> Iterable[dict[str, Any]]:
     """
     Generator yielding parsed records from a btsnoop HCI file.
     Adds 'handle' and 'peer_addr' where possible.
     Learns address->name and handle->address mappings.
     Also extracts 'opcode', 'event', 'le_subevent' for filtering/export.
     """
-    handle_to_addr: Dict[int, str] = {}   # 12-bit conn handle -> peer bdaddr
-    addr_to_name: Dict[str, str] = {}     # peer bdaddr -> friendly name
+    handle_to_addr: dict[int, str] = {}   # 12-bit conn handle -> peer bdaddr
+    addr_to_name: dict[str, str] = {}     # peer bdaddr -> friendly name
 
     with open(filename, "rb") as f:
         if f.read(8) != BTSNOOP_HEADER:
@@ -298,10 +298,10 @@ def within_time(ts: datetime.datetime, start: Optional[datetime.datetime], end: 
         return False
     return True
 
-def build_proto_filter(proto_args: Optional[Iterable[str]]) -> Optional[Set[int]]:
+def build_proto_filter(proto_args: Optional[Iterable[str]]) -> Optional[set[int]]:
     if not proto_args:
         return None
-    out: Set[int] = set()
+    out: set[int] = set()
     for p in proto_args:
         key = p.strip().lower()
         if key in PROTO_NAME_TO_TYPE:
@@ -326,7 +326,7 @@ def parse_time_arg(s: Optional[str]) -> Optional[datetime.datetime]:
             pass
     raise SystemExit(f"Could not parse time '{s}'. Try e.g. 2025-10-05T21:25:30.000Z")
 
-def label_pair(rec: Dict[str, Any], mode: str) -> Tuple[str, str]:
+def label_pair(rec: dict[str, Any], mode: str) -> tuple[str, str]:
     """
     Return (source, destination) strings based on label mode:
       - logical  -> 'host' / 'controller'
@@ -365,10 +365,10 @@ def label_pair(rec: Dict[str, Any], mode: str) -> Tuple[str, str]:
     remote = f"{name} ({peer})" if name else peer
     return (local, remote) if src_is_host else (remote, local)
 
-def record_matches_code_filters(rec: Dict[str, Any],
-                                opcode_filter: Optional[Set[int]],
-                                event_filter: Optional[Set[int]],
-                                le_sub_filter: Optional[Set[int]]) -> bool:
+def record_matches_code_filters(rec: dict[str, Any],
+                                opcode_filter: Optional[set[int]],
+                                event_filter: Optional[set[int]],
+                                le_sub_filter: Optional[set[int]]) -> bool:
     # If any filter list is provided, record must match that list
     if opcode_filter is not None:
         if rec["ptype"] != 0x01:
@@ -388,10 +388,10 @@ def record_matches_code_filters(rec: Dict[str, Any],
             return False
     return True
 
-def parse_int_set(values: Optional[List[str]], name: str) -> Optional[Set[int]]:
+def parse_int_set(values: Optional[list[str]], name: str) -> Optional[set[int]]:
     if not values:
         return None
-    out: Set[int] = set()
+    out: set[int] = set()
     for v in values:
         try:
             out.add(int(v, 0))  # supports '15', '0x0F'
@@ -399,7 +399,7 @@ def parse_int_set(values: Optional[List[str]], name: str) -> Optional[Set[int]]:
             raise SystemExit(f"Invalid {name} value '{v}'. Use decimal or hex like 0x0F.")
     return out
 
-def make_export_row(rec: Dict[str, Any], delta: float, src: str, dst: str, info: str) -> Dict[str, Any]:
+def make_export_row(rec: dict[str, Any], delta: float, src: str, dst: str, info: str) -> dict[str, Any]:
     # Friendly fields for CSV/JSON
     return {
         "no": rec["no"],
@@ -420,11 +420,11 @@ def make_export_row(rec: Dict[str, Any], delta: float, src: str, dst: str, info:
 def stream_and_collect(records: Iterable[Dict[str, Any]],
                        start: Optional[datetime.datetime],
                        end: Optional[datetime.datetime],
-                       proto_filter: Optional[Set[int]],
+                       proto_filter: Optional[set[int]],
                        direction: Optional[str],
-                       opcode_filter: Optional[Set[int]],
-                       event_filter: Optional[Set[int]],
-                       le_sub_filter: Optional[Set[int]],
+                       opcode_filter: Optional[set[int]],
+                       event_filter: Optional[set[int]],
+                       le_sub_filter: Optional[set[int]],
                        limit: Optional[int],
                        label_mode: str,
                        print_rows: bool):
@@ -472,7 +472,7 @@ def stream_and_collect(records: Iterable[Dict[str, Any]],
 
     return collected
 
-def export_csv(path: str, rows: List[Dict[str, Any]]) -> None:
+def export_csv(path: str, rows: list[dict[str, Any]]) -> None:
     if not rows:
         # Create an empty CSV with header
         with open(path, "w", newline="") as f:
@@ -486,7 +486,7 @@ def export_csv(path: str, rows: List[Dict[str, Any]]) -> None:
         writer.writeheader()
         writer.writerows(rows)
 
-def export_json(path: str, rows: List[Dict[str, Any]]) -> None:
+def export_json(path: str, rows: list[dict[str, Any]]) -> None:
     with open(path, "w") as f:
         json.dump(rows, f, indent=2)
 

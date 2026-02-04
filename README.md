@@ -63,9 +63,16 @@ as `parse_btsnoop_file` but lazily.
 
 ## Development
 
+This project relies on an **Automated Testing Pipeline** to maintain code quality. A GitHub Action workflow runs the full test suite across multiple Python versions on every push and pull request.
+
+To run the tests locally during development:
+
 ```bash
-# Run the lightweight unittest-based test suite
-python3 -m unittest discover -s tests
+# Install development dependencies
+pip install ".[dev]"
+
+# Run tests using pytest
+pytest
 
 # Optional linting (install optional dev dependencies first)
 ruff check

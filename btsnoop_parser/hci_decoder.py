@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 from .constants import HCI_OPCODE_NAMES, HCI_PACKET_TYPES
 
@@ -25,7 +25,7 @@ def _packet_type_label(packet_type: Any) -> str:
     return _PACKET_TYPE_BY_NORMALISED.get(normalised, normalised)
 
 
-def decode_hci_packet(packet_type: Any, data: bytes) -> Dict[str, Any]:
+def decode_hci_packet(packet_type: Any, data: bytes) -> dict[str, Any]:
     """
     Decode raw HCI payload bytes into a friendly dictionary.
 

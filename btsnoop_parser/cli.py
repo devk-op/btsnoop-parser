@@ -33,16 +33,35 @@ def main() -> None:
     parser.add_argument(
         "--pretty",
         action="store_true",
-        help="Pretty-print JSON output (implies --json)",
+        help="Pretty-print the JSON output",
     )
     parser.add_argument(
         "--decode",
         action="store_true",
         help="Print decoded packet metadata beneath the table",
     )
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="Analyze capture and show high-level statistics and issues",
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable colored output",
+    )
     args = parser.parse_args()
 
     records = parse_btsnoop_file(args.file)
+
+    if args.stats:
+        from .analysis import CaptureStats
+        stats = CaptureStats()
+        for record in records:
+            stats.analyze_record(record)
+        stats.print_summary()
+        return
+
     limited = slice_records(records, args.limit)
 
     if args.json or args.pretty:
@@ -51,9 +70,10 @@ def main() -> None:
         print(json.dumps(data, indent=indent))
         return
 
-    print_table(limited, limit=args.limit)
+    print_table(limited, limit=args.limit, color=not args.no_color)
 
     if args.decode:
         for record in limited:
             decoded = decode_hci_packet(record["packet_type"], record["payload"])
             print(f"{record['index']:>4} {decoded}")
+
