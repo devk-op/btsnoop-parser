@@ -1,6 +1,6 @@
 # btsnoop-parser
 
-[![CI](https://github.com/krathi/btsnoop-parser/actions/workflows/ci.yml/badge.svg)](https://github.com/krathi/btsnoop-parser/actions/workflows/ci.yml)
+[![CI](https://github.com/devk-op/btsnoop-parser/actions/workflows/ci.yml/badge.svg)](https://github.com/devk-op/btsnoop-parser/actions?query=workflow%3A"CI%2FCD+Pipeline")
 
 `btsnoop-parser` is a small library and CLI for exploring Bluetooth `btsnoop_hci.log`
 captures produced on Android devices. It focuses on being a lightweight alternative
