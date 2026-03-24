@@ -6,7 +6,7 @@ import datetime
 import logging
 from typing import Any, Optional
 
-from .constants import HCI_ERROR_CODES
+from .constants import HCI_ERROR_CODES, HCI_OPCODE_NAMES
 
 LOG = logging.getLogger(__name__)
 
@@ -75,15 +75,18 @@ class CaptureStats:
                 elif reason == 0x13:
                     reason_str += " (Remote Device)"
 
+                # 0x13=Remote User Terminated, 0x14=Remote Low Resources,
+                # 0x15=Remote Power Off, 0x16=Local Terminated
+                _normal_reasons = (0x00, 0x13, 0x14, 0x15, 0x16)
                 self.lifecycle_events.append({
                     "timestamp": ts,
                     "event": "Disconnected",
                     "handle": f"0x{handle:03X}",
                     "details": f"Reason: {reason_str}",
-                    "is_error": reason not in (0x13, 0x16, 0x00) # 0x13=Remote User Terminated, 0x16=Local Terminated
+                    "is_error": reason not in _normal_reasons,
                 })
-                
-                if reason not in (0x13, 0x16, 0x00):
+
+                if reason not in _normal_reasons:
                      self.issues.append({
                          "timestamp": ts,
                          "level": "WARN",
@@ -112,11 +115,18 @@ class CaptureStats:
                         })
                     else:
                         err_str = HCI_ERROR_CODES.get(status, f"0x{status:02X}")
+                        self.lifecycle_events.append({
+                            "timestamp": ts,
+                            "event": "Connect Failed (LE)",
+                            "handle": f"0x{handle:03X}",
+                            "details": f"Device: {bd_addr} — {err_str}",
+                            "is_error": True,
+                        })
                         self.issues.append({
-                             "timestamp": ts,
-                             "level": "WARN",
-                             "title": "LE Connection Failed",
-                             "detail": f"Failed to connect to {bd_addr}: {err_str}"
+                            "timestamp": ts,
+                            "level": "WARN",
+                            "title": "LE Connection Failed",
+                            "detail": f"Failed to connect to {bd_addr}: {err_str}",
                         })
 
                 # LE Enhanced Connection Complete (0x0A) - used in Bluetooth 5.x
@@ -153,12 +163,19 @@ class CaptureStats:
                     })
                 else:
                     err_str = HCI_ERROR_CODES.get(status, f"0x{status:02X}")
+                    self.lifecycle_events.append({
+                        "timestamp": ts,
+                        "event": "Connect Failed (Classic)",
+                        "handle": f"0x{handle:03X}",
+                        "details": f"Device: {bd_addr} — {err_str}",
+                        "is_error": True,
+                    })
                     self.issues.append({
-                         "timestamp": ts,
-                         "level": "WARN",
-                         "title": "Connection Failed",
-                         "detail": f"Failed to connect to {bd_addr}: {err_str}"
-                     })
+                        "timestamp": ts,
+                        "level": "WARN",
+                        "title": "Connection Failed",
+                        "detail": f"Failed to connect to {bd_addr}: {err_str}",
+                    })
 
             # Synchronous Connection Complete (0x2C)
             elif event_code == 0x2C and len(payload) >= 19:
@@ -181,16 +198,16 @@ class CaptureStats:
             # Command Complete (0x0E)
             elif event_code == 0x0E and len(payload) >= 6:
                 opcode = payload[3] | (payload[4] << 8)
-                if len(payload) > 5:
-                    status = payload[5]
-                    if status != 0x00:
-                        err_str = HCI_ERROR_CODES.get(status, f"0x{status:02X}")
-                        self.issues.append({
-                             "timestamp": ts,
-                             "level": "ERROR",
-                             "title": "Command Failure",
-                             "detail": f"Opcode 0x{opcode:04X} failed with status {err_str}"
-                         })
+                status = payload[5]
+                if status != 0x00:
+                    err_str = HCI_ERROR_CODES.get(status, f"0x{status:02X}")
+                    opcode_name = HCI_OPCODE_NAMES.get(opcode, f"0x{opcode:04X}")
+                    self.issues.append({
+                        "timestamp": ts,
+                        "level": "ERROR",
+                        "title": "Command Failure",
+                        "detail": f"{opcode_name} failed: {err_str}",
+                    })
 
             # Command Status (0x0F)
             elif event_code == 0x0F and len(payload) >= 6:
@@ -198,12 +215,13 @@ class CaptureStats:
                 opcode = payload[4] | (payload[5] << 8)
                 if status != 0x00:
                     err_str = HCI_ERROR_CODES.get(status, f"0x{status:02X}")
+                    opcode_name = HCI_OPCODE_NAMES.get(opcode, f"0x{opcode:04X}")
                     self.issues.append({
-                         "timestamp": ts,
-                         "level": "ERROR",
-                         "title": "Command Status Error",
-                         "detail": f"Opcode 0x{opcode:04X} returned status {err_str}"
-                     })
+                        "timestamp": ts,
+                        "level": "ERROR",
+                        "title": "Command Status Error",
+                        "detail": f"{opcode_name} returned status {err_str}",
+                    })
 
             # Hardware Error (0x10)
             elif event_code == 0x10 and len(payload) >= 2:
@@ -229,24 +247,33 @@ class CaptureStats:
         duration = "N/A"
         if self.start_time and self.end_time:
             diff = self.end_time - self.start_time
-            duration = str(diff)
+            total_s = int(diff.total_seconds())
+            h, rem = divmod(total_s, 3600)
+            m, s = divmod(rem, 60)
+            ms = diff.microseconds // 1000
+            if h:
+                duration = f"{h}h {m:02d}m {s:02d}.{ms:03d}s"
+            elif m:
+                duration = f"{m}m {s:02d}.{ms:03d}s"
+            else:
+                duration = f"{s}.{ms:03d}s"
 
-        print(f"\\n{BOLD} Capture Statistics ───{RESET}")
+        print(f"\n{BOLD} Capture Statistics ───{RESET}")
         print(f"  {BOLD}Duration:{RESET}      {duration}")
         print(f"  {BOLD}Total Packets:{RESET} {self.total_packets:,}")
         print(f"  {BOLD}Data Volume:{RESET}   {self.total_bytes / 1024:.2f} KB")
-        
-        print(f"\\n{BOLD}Packet Types:{RESET}")
+
+        print(f"\n{BOLD}Packet Types:{RESET}")
         for ptype, count in self.packets_by_type.most_common():
             print(f"  {ptype:<15} {count:>8,}")
 
         if self.devices:
-            print(f"\\n{BOLD}Detected Devices:{RESET}")
+            print(f"\n{BOLD}Detected Devices:{RESET}")
             for addr, name in self.devices.items():
                 print(f"  {CYAN}{addr}{RESET}  {name}")
-        
+
         if self.lifecycle_events:
-            print(f"\\n{BOLD}Connection History:{RESET}")
+            print(f"\n{BOLD}Connection History:{RESET}")
             # Sort by timestamp just in case
             self.lifecycle_events.sort(key=lambda x: x["timestamp"])
             
@@ -265,7 +292,7 @@ class CaptureStats:
                 print(f"  {t_str} {c_evt}{etype:<20}{RESET} {handle} -> {details}")
 
         if self.issues:
-            print(f"\\n{BOLD}Potential Issues ({len(self.issues)}):{RESET}")
+            print(f"\n{BOLD}Potential Issues ({len(self.issues)}):{RESET}")
             for issue in self.issues:
                 color = RED if issue["level"] in ("ERROR", "CRITICAL") else YELLOW
                 # Convert to local time and include date for context
@@ -277,4 +304,4 @@ class CaptureStats:
                 t_str = local_ts.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                 print(f"  {color}[{issue['level']}] {t_str} - {issue['title']}{RESET}: {issue['detail']}")
         else:
-            print(f"\\n{BOLD}{GREEN}No obvious issues detected.{RESET}")
+            print(f"\n{BOLD}{GREEN}No obvious issues detected.{RESET}")

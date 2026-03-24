@@ -52,7 +52,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    records = parse_btsnoop_file(args.file)
+    try:
+        records = parse_btsnoop_file(args.file)
+    except FileNotFoundError:
+        parser.error(f"File not found: {args.file}")
+    except PermissionError:
+        parser.error(f"Permission denied: {args.file}")
 
     if args.stats:
         from .analysis import CaptureStats

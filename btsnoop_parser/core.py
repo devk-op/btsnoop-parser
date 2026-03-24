@@ -189,7 +189,7 @@ def iter_records(
                     ts = ts_corrected
             # -----------------------------------------------------------
 
-        except Exception as exc:
+        except (ValueError, OverflowError, OSError) as exc:
             LOG.error("Skipping record with invalid timestamp %s: %s", timestamp, exc)
             continue
 
