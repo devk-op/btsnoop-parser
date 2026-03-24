@@ -2,7 +2,7 @@ import argparse
 import json
 from typing import Any
 
-from .core import parse_btsnoop_file, print_table, slice_records
+from .core import filter_records, parse_btsnoop_file, print_table, slice_records
 from .hci_decoder import decode_hci_packet
 
 
@@ -26,6 +26,18 @@ def main() -> None:
     parser.add_argument("file", help="Path to a btsnoop_hci.log file")
     parser.add_argument("--limit", type=int, help="Limit the number of records shown")
     parser.add_argument(
+        "--filter",
+        dest="filters",
+        metavar="EXPR",
+        action="append",
+        default=[],
+        help=(
+            "Filter expression as key:value.  May be repeated. "
+            "Supported keys: type (command/acl/event/sco/iso or 0xNN), dir (tx/rx). "
+            "Example: --filter type:event --filter dir:rx"
+        ),
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Emit JSON instead of a text table (payload is hex encoded)",
@@ -46,6 +58,11 @@ def main() -> None:
         help="Analyze capture and show high-level statistics and issues",
     )
     parser.add_argument(
+        "--pcap",
+        metavar="OUTPUT.pcap",
+        help="Write records to a PCAP file (Wireshark-compatible, link type 201)",
+    )
+    parser.add_argument(
         "--no-color",
         action="store_true",
         help="Disable colored output",
@@ -58,6 +75,20 @@ def main() -> None:
         parser.error(f"File not found: {args.file}")
     except PermissionError:
         parser.error(f"Permission denied: {args.file}")
+
+    # Apply filters before any other processing
+    if args.filters:
+        try:
+            records = filter_records(records, args.filters)
+        except ValueError as exc:
+            parser.error(str(exc))
+
+    # --pcap: write and exit (can combine with --filter)
+    if args.pcap:
+        from .pcap import write_pcap
+        n = write_pcap(records, args.pcap)
+        print(f"Wrote {n} packets to {args.pcap}")
+        return
 
     if args.stats:
         from .analysis import CaptureStats
@@ -81,4 +112,3 @@ def main() -> None:
         for record in limited:
             decoded = decode_hci_packet(record["packet_type"], record["payload"])
             print(f"{record['index']:>4} {decoded}")
-

@@ -288,3 +288,82 @@ def slice_records(records: Sequence[Mapping[str, object]], limit: Optional[int])
     if limit is None or limit >= len(records):
         return records
     return records[:limit]
+
+
+# Normalised aliases accepted by filter_records for the "type" key.
+_TYPE_ALIASES: dict[str, set[int]] = {
+    "command": {0x01},
+    "cmd":     {0x01},
+    "acl":     {0x02},
+    "sco":     {0x03},
+    "event":   {0x04},
+    "evt":     {0x04},
+    "iso":     {0x05},
+}
+
+
+def filter_records(
+    records: Sequence[Mapping[str, object]],
+    filters: Sequence[str],
+) -> list[Mapping[str, object]]:
+    """Return records that match *all* of the supplied filter expressions.
+
+    Each expression is a ``key:value`` string.  Supported keys:
+
+    * ``type`` — packet type name or number, e.g. ``type:event``, ``type:acl``,
+      ``type:0x04``.  Multiple values may be comma-separated:
+      ``type:command,event``.
+    * ``dir`` — direction: ``dir:tx`` or ``dir:rx``.
+
+    Examples::
+
+        filter_records(records, ["type:event"])
+        filter_records(records, ["type:command,event", "dir:tx"])
+    """
+    if not filters:
+        return list(records)
+
+    # Pre-parse filter expressions once
+    type_ids: Optional[set[int]] = None
+    dir_value: Optional[str] = None
+
+    for expr in filters:
+        if ":" not in expr:
+            raise ValueError(f"Invalid filter expression {expr!r} — expected 'key:value'")
+        key, _, value = expr.partition(":")
+        key = key.strip().lower()
+        value = value.strip().lower()
+
+        if key == "type":
+            ids: set[int] = set()
+            for part in value.split(","):
+                part = part.strip()
+                if part.startswith("0x"):
+                    ids.add(int(part, 16))
+                elif part.isdigit():
+                    ids.add(int(part))
+                elif part in _TYPE_ALIASES:
+                    ids.update(_TYPE_ALIASES[part])
+                else:
+                    raise ValueError(
+                        f"Unknown packet type {part!r}. "
+                        f"Valid values: {', '.join(sorted(_TYPE_ALIASES))}, or a hex/int."
+                    )
+            type_ids = ids if type_ids is None else type_ids & ids
+
+        elif key == "dir":
+            if value not in ("tx", "rx"):
+                raise ValueError(f"Invalid dir value {value!r} — use 'tx' or 'rx'")
+            dir_value = value.upper()
+
+        else:
+            raise ValueError(f"Unknown filter key {key!r}. Supported keys: type, dir")
+
+    result = []
+    for record in records:
+        if type_ids is not None and record["packet_type"] not in type_ids:
+            continue
+        if dir_value is not None and record["direction"] != dir_value:
+            continue
+        result.append(record)
+    return result

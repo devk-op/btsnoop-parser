@@ -1,18 +1,49 @@
 # btsnoop-parser
 
 [![CI](https://github.com/devk-op/btsnoop-parser/actions/workflows/ci.yml/badge.svg)](https://github.com/devk-op/btsnoop-parser/actions?query=workflow%3A"CI%2FCD+Pipeline")
+[![PyPI](https://img.shields.io/pypi/v/btsnoop-parser)](https://pypi.org/project/btsnoop-parser/)
+[![Docs](https://readthedocs.org/projects/btsnoop-parser/badge/?version=latest)](https://btsnoop-parser.readthedocs.io)
+[![Python](https://img.shields.io/pypi/pyversions/btsnoop-parser)](https://pypi.org/project/btsnoop-parser/)
 
 `btsnoop-parser` is a small library and CLI for exploring Bluetooth `btsnoop_hci.log`
-captures produced on Android devices. It focuses on being a lightweight alternative
-to Wireshark when you only need a quick glance at packet metadata or want to script
-over captures in Python.
+captures produced on Android devices.  It is a lightweight alternative to Wireshark
+when you need a quick look at packet metadata or want to script over captures in Python.
+
+```
+$ btsnoop_parser capture.log --stats
+
+ Capture Statistics ───
+  Duration:      4m 32.871s
+  Total Packets: 1,842
+  Data Volume:   142.67 KB
+
+Packet Types:
+  ACL Data            1,204
+  Event                 512
+  Command               126
+
+Detected Devices:
+  AA:BB:CC:DD:EE:FF  Unknown
+  11:22:33:44:55:66  Unknown
+
+Connection History:
+  2024-06-01 09:12:03.441  Connected (LE)        0x001 -> Device: AA:BB:CC:DD:EE:FF
+  2024-06-01 09:14:21.009  Disconnected          0x001 -> Reason: Remote User Terminated Connection (Remote Device)
+  2024-06-01 09:15:44.230  Connect Failed (LE)   0x002 -> Device: 11:22:33:44:55:66 — Page Timeout
+
+Potential Issues (1):
+  [WARN] 2024-06-01 09:15:44.230 - LE Connection Failed: Failed to connect to 11:22:33:44:55:66: Page Timeout
+```
 
 ## Features
 
-- Parses BTSnoop HCI logs into friendly Python dictionaries.
-- Provides a Wireshark-style CLI table with optional JSON export.
+- Parses BTSnoop HCI logs into friendly Python dicts — zero dependencies.
+- Wireshark-style CLI table with direction colouring.
+- **`--filter`** — filter by packet type and direction before processing.
+- **`--pcap`** — export to PCAP (link type 201) for Wireshark / tshark.
+- **`--stats`** — connection history, device list, and issue detection.
 - Decodes common HCI command/event payloads.
-- Ships with pure-Python code and zero runtime dependencies.
+- Corrects the Android ±378-day timestamp bug automatically.
 
 ## Installation
 
@@ -20,61 +51,77 @@ over captures in Python.
 pip install btsnoop-parser
 ```
 
-To work with a local checkout during development:
+## CLI Usage
 
 ```bash
-pip install -e .
+# Wireshark-style table, first 20 packets
+btsnoop_parser capture.log --limit 20
+
+# Show only HCI events
+btsnoop_parser capture.log --filter type:event
+
+# Show only TX commands
+btsnoop_parser capture.log --filter type:command --filter dir:tx
+
+# Export filtered records to a PCAP file — open directly in Wireshark
+btsnoop_parser capture.log --filter type:event --pcap events.pcap
+
+# Convert the whole capture to PCAP
+btsnoop_parser capture.log --pcap full.pcap
+
+# Capture statistics and issue detection
+btsnoop_parser capture.log --stats
+
+# JSON output for scripting
+btsnoop_parser capture.log --json | jq '[.[] | select(.direction=="RX")]'
 ```
 
-## Command Line Usage
+Run `btsnoop_parser --help` for the full option list.
 
-After installation the `btsnoop_parser` entry point becomes available:
+### `--filter` expressions
 
-```bash
-# Show the first 10 packets in a capture
-btsnoop_parser path/to/btsnoop_hci.log --limit 10
+| Key    | Values                                          | Example                  |
+|--------|-------------------------------------------------|--------------------------|
+| `type` | `command`, `acl`, `event`, `sco`, `iso`, `0xNN` | `--filter type:event`    |
+| `dir`  | `tx`, `rx`                                      | `--filter dir:tx`        |
 
-# Emit JSON for scripting
-btsnoop_parser path/to/btsnoop_hci.log --json --limit 5
-
-# Print decoded HCI command/event metadata
-btsnoop_parser path/to/btsnoop_hci.log --decode
-```
-
-Run `btsnoop_parser --help` for the complete option list.
+Comma-separate types for OR logic: `--filter type:command,event`
+Repeat the flag to AND filters: `--filter type:event --filter dir:rx`
 
 ## Python API
 
 ```python
-from btsnoop_parser import decode_hci_packet, parse_btsnoop_file
+from btsnoop_parser import (
+    parse_btsnoop_file,
+    iter_records,
+    filter_records,
+    write_pcap,
+    decode_hci_packet,
+)
 
+# Load all records
 records = parse_btsnoop_file("btsnoop_hci.log")
 
-for record in records[:5]:
-    print(record["timestamp"], record["packet_type_name"], record["direction"])
+# Filter to HCI events only
+events = filter_records(records, ["type:event"])
+
+# Export to Wireshark-compatible PCAP
+write_pcap(records, "capture.pcap")
+
+# Stream large files without loading everything into memory
+for record in iter_records("btsnoop_hci.log"):
     decoded = decode_hci_packet(record["packet_type"], record["payload"])
-    if decoded["type"] == "COMMAND":
-        print("  ↳", decoded["name"], hex(decoded["opcode"]))
+    if decoded.get("type") == "COMMAND":
+        print(record["timestamp"], decoded["name"])
 ```
 
-If you only need to stream over a file without holding everything in memory,
-`btsnoop_parser.iter_records(Path("capture.btsnoop"))` yields the same dictionaries
-as `parse_btsnoop_file` but lazily.
+Full API reference: **[btsnoop-parser.readthedocs.io](https://btsnoop-parser.readthedocs.io)**
 
 ## Development
 
-This project relies on an **Automated Testing Pipeline** to maintain code quality. A GitHub Action workflow runs the full test suite across multiple Python versions on every push and pull request.
-
-To run the tests locally during development:
-
 ```bash
-# Install development dependencies
-pip install ".[dev]"
-
-# Run tests using pytest
+pip install -e ".[dev]"
 pytest
-
-# Optional linting (install optional dev dependencies first)
 ruff check
 ```
 

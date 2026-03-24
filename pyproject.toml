@@ -1,6 +1,6 @@
 [project]
 name = "btsnoop-parser"
-version = "0.3.0"
+version = "0.4.0"
 description = "Parse and explore Bluetooth HCI btsnoop captures from Android devices."
 authors = [{ name = "Kranthi", email = "kdevprofile@gmail.com" }]
 license = "MIT"
