@@ -83,16 +83,27 @@ class TestBuildContext(unittest.TestCase):
         self.assertNotIn("\033[", ctx)
 
 
+class _Encoding(dict):
+    """Stands in for transformers' BatchEncoding: a dict with .to(), no tensor attributes."""
+
+    def to(self, device):
+        return self
+
+    def __getattr__(self, name):
+        raise AttributeError(name)
+
+
 class TestAsk(unittest.TestCase):
     def _mock_transformers(self):
         torch_mock = MagicMock()
         torch_mock.backends.mps.is_available.return_value = False
 
         tokenizer_mock = MagicMock()
-        tensor_mock = MagicMock()
-        tensor_mock.shape = (1, 7)
-        tensor_mock.to.return_value = tensor_mock
-        tokenizer_mock.apply_chat_template.return_value = tensor_mock
+        input_ids = MagicMock()
+        input_ids.shape = (1, 7)
+        tokenizer_mock.apply_chat_template.return_value = _Encoding(
+            input_ids=input_ids, attention_mask=MagicMock()
+        )
         tokenizer_mock.decode.return_value = "diagnosis text"
 
         model_mock = MagicMock()
@@ -113,6 +124,20 @@ class TestAsk(unittest.TestCase):
         self.assertEqual(answer, "diagnosis text")
         transformers_mock.AutoModelForCausalLM.from_pretrained.assert_called_once_with("fake/model")
         model_mock.generate.assert_called_once()
+
+    def test_ask_passes_encoding_as_keyword_args(self):
+        # transformers 5.x returns a BatchEncoding (dict) from apply_chat_template;
+        # passing it positionally to generate() crashed with KeyError/AttributeError 'shape'.
+        torch_mock, transformers_mock, tokenizer_mock, model_mock = self._mock_transformers()
+        with patch.dict(sys.modules, {"torch": torch_mock, "transformers": transformers_mock}):
+            ask(_stats())
+
+        _, template_kwargs = tokenizer_mock.apply_chat_template.call_args
+        self.assertTrue(template_kwargs.get("return_dict"))
+        gen_args, gen_kwargs = model_mock.generate.call_args
+        self.assertEqual(gen_args, ())
+        self.assertIn("input_ids", gen_kwargs)
+        self.assertIn("attention_mask", gen_kwargs)
 
     def test_ask_raises_model_unavailable_when_transformers_missing(self):
         with patch.dict(sys.modules, {"transformers": None}):
