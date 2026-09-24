@@ -16,3 +16,9 @@ dist/
 
 # Logs
 *.log
+
+# LoRA training artifacts (multi-hundred-MB, regenerate via training/train_lora.py)
+training/checkpoints/
+
+# Synthetic training data (deterministic, regenerate via training/generate_dataset.py)
+training/data/

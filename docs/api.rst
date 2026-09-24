@@ -36,3 +36,17 @@ Analysis
 .. autoclass:: btsnoop_parser.analysis.CaptureStats
    :members:
    :undoc-members:
+
+LLM analysis
+------------
+
+Requires the ``ai`` extra (``pip install "btsnoop-parser[ai]"``).
+
+.. autofunction:: btsnoop_parser.llm.build_context
+
+.. autofunction:: btsnoop_parser.llm.ask
+
+Security
+--------
+
+.. autofunction:: btsnoop_parser.security.extract_link_keys

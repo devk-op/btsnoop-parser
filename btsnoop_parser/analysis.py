@@ -11,6 +11,22 @@ from .constants import HCI_ERROR_CODES, HCI_OPCODE_NAMES
 LOG = logging.getLogger(__name__)
 
 
+def format_duration(start_time: Optional[datetime.datetime], end_time: Optional[datetime.datetime]) -> str:
+    """Render a start/end timestamp pair as a human-readable duration string."""
+    if not start_time or not end_time:
+        return "N/A"
+    diff = end_time - start_time
+    total_s = int(diff.total_seconds())
+    h, rem = divmod(total_s, 3600)
+    m, s = divmod(rem, 60)
+    ms = diff.microseconds // 1000
+    if h:
+        return f"{h}h {m:02d}m {s:02d}.{ms:03d}s"
+    if m:
+        return f"{m}m {s:02d}.{ms:03d}s"
+    return f"{s}.{ms:03d}s"
+
+
 class CaptureStats:
     """Aggregates statistics for a BTSnoop capture."""
 
@@ -244,19 +260,7 @@ class CaptureStats:
         CYAN = "\033[96m"
         RESET = "\033[0m"
 
-        duration = "N/A"
-        if self.start_time and self.end_time:
-            diff = self.end_time - self.start_time
-            total_s = int(diff.total_seconds())
-            h, rem = divmod(total_s, 3600)
-            m, s = divmod(rem, 60)
-            ms = diff.microseconds // 1000
-            if h:
-                duration = f"{h}h {m:02d}m {s:02d}.{ms:03d}s"
-            elif m:
-                duration = f"{m}m {s:02d}.{ms:03d}s"
-            else:
-                duration = f"{s}.{ms:03d}s"
+        duration = format_duration(self.start_time, self.end_time)
 
         print(f"\n{BOLD} Capture Statistics ───{RESET}")
         print(f"  {BOLD}Duration:{RESET}      {duration}")

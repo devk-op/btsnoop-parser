@@ -52,6 +52,35 @@ Options
    Analyse the capture and print connection history, detected devices, and
    potential issues.
 
+.. option:: --ai
+
+   Ask a local LLM to diagnose capture issues in plain English. Requires the
+   ``ai`` extra (``pip install "btsnoop-parser[ai]"``) — pulls in ``torch``
+   and ``transformers``. Runs entirely locally; only a summarized version of
+   the capture is sent to the model, never raw packets.
+
+.. option:: --question TEXT
+
+   Question to ask the LLM about the capture (used with ``--ai``). Defaults
+   to asking why the session failed and what the likely root cause is.
+
+.. option:: --base-model NAME
+
+   Hugging Face model id to use for ``--ai`` (default:
+   ``Qwen/Qwen2.5-1.5B-Instruct``).
+
+.. option:: --adapter-path DIR
+
+   Path to a LoRA adapter directory to specialize the ``--ai`` model — see
+   ``training/README.md`` for how to fine-tune one.
+
+.. option:: --link-keys
+
+   Extract Classic BT link keys seen in HCI traffic (Link Key Notification
+   events and Link Key Request Reply commands) and print device address, key,
+   and key type. A link key is credential material — only use this against
+   captures you're authorized to analyze. BLE (LTK) isn't covered.
+
 .. option:: --no-color
 
    Disable ANSI colour codes in output.
@@ -78,6 +107,13 @@ Examples
 
    # Capture statistics and issue detection
    btsnoop_parser capture.log --stats
+
+   # Ask a local LLM to diagnose issues (requires the 'ai' extra)
+   btsnoop_parser capture.log --ai
+   btsnoop_parser capture.log --ai --question "Why did the connection drop?"
+
+   # Extract Classic BT link keys (your own authorized captures only)
+   btsnoop_parser capture.log --link-keys
 
    # Scripting with JSON
    btsnoop_parser capture.log --json | jq '[.[] | select(.direction=="RX")]'

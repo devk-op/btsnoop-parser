@@ -35,6 +35,18 @@ Potential Issues (1):
   [WARN] 2024-06-01 09:15:44.230 - LE Connection Failed: Failed to connect to 11:22:33:44:55:66: Page Timeout
 ```
 
+```
+$ btsnoop_parser capture.log --ai
+
+Loading Qwen/Qwen2.5-1.5B-Instruct (this may take a moment)...
+(1) The LE connection attempt to 11:22:33:44:55:66 (handle 0x002) failed to
+establish. (2) This happened at 09:15:44.230, shortly after a successful
+connection and clean disconnect from a different device (AA:BB:CC:DD:EE:FF).
+(3) The controller reported a Page Timeout, meaning the peer never responded
+to the connection request — most likely it was out of range or powered off,
+not a fault in the local host.
+```
+
 ## Features
 
 - Parses BTSnoop HCI logs into friendly Python dicts — zero dependencies.
@@ -42,6 +54,8 @@ Potential Issues (1):
 - **`--filter`** — filter by packet type and direction before processing.
 - **`--pcap`** — export to PCAP (link type 201) for Wireshark / tshark.
 - **`--stats`** — connection history, device list, and issue detection.
+- **`--ai`** — ask a local LLM to diagnose capture issues in plain English (fully offline, optional extra).
+- **`--link-keys`** — extract Classic BT link keys seen in HCI traffic (for use with your own authorized captures).
 - Decodes common HCI command/event payloads.
 - Corrects the Android ±378-day timestamp bug automatically.
 
@@ -49,6 +63,13 @@ Potential Issues (1):
 
 ```bash
 pip install btsnoop-parser
+```
+
+The `--ai` flag is an optional, heavier extra (pulls in `torch`/`transformers` —
+several GB) — the rest of the library stays dependency-free:
+
+```bash
+pip install "btsnoop-parser[ai]"
 ```
 
 ## CLI Usage
@@ -71,6 +92,18 @@ btsnoop_parser capture.log --pcap full.pcap
 
 # Capture statistics and issue detection
 btsnoop_parser capture.log --stats
+
+# Ask a local LLM to diagnose issues — requires `pip install "btsnoop-parser[ai]"`
+# Only the decoded/summarized capture is sent to the model (not raw packets),
+# and everything runs locally: no cloud calls, only a one-time model download.
+btsnoop_parser capture.log --ai
+btsnoop_parser capture.log --ai --question "Why did the connection drop at 09:15?"
+
+# Specialize --ai with a LoRA adapter you've fine-tuned yourself (see training/)
+btsnoop_parser capture.log --ai --adapter-path training/checkpoints/hci-rootcause-lora
+
+# Extract Classic BT link keys seen in the capture (your own authorized captures only)
+btsnoop_parser capture.log --link-keys
 
 # JSON output for scripting
 btsnoop_parser capture.log --json | jq '[.[] | select(.direction=="RX")]'
@@ -116,6 +149,29 @@ for record in iter_records("btsnoop_hci.log"):
 ```
 
 Full API reference: **[btsnoop-parser.readthedocs.io](https://btsnoop-parser.readthedocs.io)**
+
+## Local LLM analysis (`--ai`)
+
+`--ai` prompts a local Hugging Face model (default: `Qwen/Qwen2.5-1.5B-Instruct`)
+with a plain-text summary of the capture's connection history and detected
+issues, and asks it to explain what went wrong. It works out of the box with
+just the base model, or you can specialize it further by fine-tuning a LoRA
+adapter on your own — see [`training/README.md`](training/README.md) for a
+full walkthrough (dataset generation, LoRA training with `peft`, evaluation).
+
+## Link key extraction (`--link-keys`)
+
+Classic Bluetooth (BR/EDR) link keys pass over HCI in the clear — the
+controller hands a freshly-paired key to the host via a *Link Key
+Notification* event, and the host replays a cached key back via a *Link Key
+Request Reply* command on every reconnection. `--link-keys` scans a capture
+for both and prints the device address, key, and (when known) how the key
+was derived — useful for e.g. loading a key into Wireshark to decrypt your
+own encrypted captures.
+
+A link key is credential material for that device — only run this against
+captures you're authorized to analyze. BLE isn't covered (it negotiates an
+LTK through a different mechanism).
 
 ## Development
 

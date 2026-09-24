@@ -1,6 +1,6 @@
 [project]
 name = "btsnoop-parser"
-version = "0.4.0"
+version = "0.5.0"
 description = "Parse and explore Bluetooth HCI btsnoop captures from Android devices."
 authors = [{ name = "Kranthi", email = "kdevprofile@gmail.com" }]
 license = "MIT"
@@ -32,6 +32,8 @@ Issues = "https://github.com/devk-op/btsnoop-parser/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.4"]
+ai = ["torch>=2.3", "transformers>=4.44", "peft>=0.12"]
+train = ["torch>=2.3", "transformers>=4.44", "peft>=0.12", "datasets>=2.20", "accelerate>=0.33"]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

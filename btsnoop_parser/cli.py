@@ -1,5 +1,6 @@
 import argparse
 import json
+import sys
 from typing import Any
 
 from .core import filter_records, parse_btsnoop_file, print_table, slice_records
@@ -19,6 +20,14 @@ def _serialise_record(record: dict[str, Any]) -> dict[str, Any]:
     serialised.pop("packet_type_str", None)
     serialised.pop("packet_type_id", None)
     return serialised
+
+
+def _build_capture_stats(records):
+    from .analysis import CaptureStats
+    stats = CaptureStats()
+    for record in records:
+        stats.analyze_record(record)
+    return stats
 
 
 def main() -> None:
@@ -58,6 +67,34 @@ def main() -> None:
         help="Analyze capture and show high-level statistics and issues",
     )
     parser.add_argument(
+        "--ai",
+        action="store_true",
+        help="Analyze capture issues with a local LLM (requires the 'ai' extra)",
+    )
+    parser.add_argument(
+        "--question",
+        metavar="TEXT",
+        default=None,
+        help="Question to ask the LLM about the capture (used with --ai)",
+    )
+    parser.add_argument(
+        "--base-model",
+        metavar="NAME",
+        default=None,
+        help="Hugging Face model id to use for --ai (default: Qwen/Qwen2.5-1.5B-Instruct)",
+    )
+    parser.add_argument(
+        "--adapter-path",
+        metavar="DIR",
+        default=None,
+        help="Path to a LoRA adapter directory to specialize the --ai model",
+    )
+    parser.add_argument(
+        "--link-keys",
+        action="store_true",
+        help="Extract Classic BT link keys seen in HCI traffic (sensitive — see docs)",
+    )
+    parser.add_argument(
         "--pcap",
         metavar="OUTPUT.pcap",
         help="Write records to a PCAP file (Wireshark-compatible, link type 201)",
@@ -91,11 +128,47 @@ def main() -> None:
         return
 
     if args.stats:
-        from .analysis import CaptureStats
-        stats = CaptureStats()
-        for record in records:
-            stats.analyze_record(record)
+        stats = _build_capture_stats(records)
         stats.print_summary()
+        return
+
+    if args.ai:
+        stats = _build_capture_stats(records)
+        from .llm import (
+            DEFAULT_BASE_MODEL,
+            DEFAULT_QUESTION,
+            ModelUnavailableError,
+            ask,
+        )
+        base_model = args.base_model or DEFAULT_BASE_MODEL
+        print(f"Loading {base_model} (this may take a moment)...", file=sys.stderr)
+        try:
+            answer = ask(
+                stats,
+                question=args.question or DEFAULT_QUESTION,
+                base_model=base_model,
+                adapter_path=args.adapter_path,
+            )
+        except ModelUnavailableError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        print(answer)
+        return
+
+    if args.link_keys:
+        from .security import extract_link_keys
+        print(
+            "Warning: link keys are credential material — only use with captures "
+            "you're authorized to analyze.",
+            file=sys.stderr,
+        )
+        keys = extract_link_keys(records)
+        if not keys:
+            print("No link keys found.")
+            return
+        for k in keys:
+            key_type = f" [{k['key_type_name']}]" if k["key_type_name"] else ""
+            print(f"{k['timestamp']}  {k['addr']}  {k['link_key']}  ({k['source']}){key_type}")
         return
 
     limited = slice_records(records, args.limit)
