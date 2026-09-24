@@ -9,6 +9,8 @@ import os
 import struct
 from typing import BinaryIO, Iterator, Mapping, MutableMapping, Optional, Sequence, Union
 
+from .constants import HCI_OPCODE_NAMES
+
 BTSNOOP_HEADER = b"btsnoop\0"
 # μs between 0001-01-01 and 1970-01-01 (btsnoop epoch → Unix epoch)
 BTSNOOP_EPOCH_DELTA_US = 62135596800000000
@@ -48,24 +50,7 @@ LE_SUBEVENT_NAMES = {
     0x1D: "LE BIG Info Adv Report",
 }
 
-# A tiny set of common command opcodes (Opcode = OGF<<10 | OCF)
-CMD_NAMES = {
-    0x0C01: "Set Event Mask",
-    0x0C03: "Reset",
-    0x0C14: "Read Local Name",
-    0x0C1F: "Write LE Host Supported",
-    0x0C3C: "Read Local Supported Codecs (V2)",
-    0x1001: "Read Local Version Information",
-    0x1002: "Read Local Supported Commands",
-    0x1003: "Read Local Supported Features",
-    0x1009: "Read BD_ADDR",
-    0x2001: "LE Set Event Mask",
-    0x2002: "LE Read Buffer Size",
-    0x2003: "LE Read Local Supported Features",
-    0x200C: "LE Read White List Size",
-    0x201C: "LE Read Supported States",
-    0x2067: "LE Read Local Supported Features (V2)",
-}
+CMD_NAMES = HCI_OPCODE_NAMES
 
 
 def _ts_from_btsnoop(timestamp_us: int) -> _dt.datetime:
