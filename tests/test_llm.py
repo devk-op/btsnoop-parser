@@ -77,6 +77,18 @@ class TestBuildContext(unittest.TestCase):
             self.assertIn(f"Failed-{i}", ctx)
         self.assertIn("omitted", ctx)
 
+    def test_routine_failures_separated_from_detected_issues(self):
+        s = _stats(issues=[_issue(level="INFO", title="Command Failure", detail="Vendor-specific command 0xFC17 failed")])
+        ctx = build_context(s)
+        detected, routine = ctx.split("Routine Failures")
+        self.assertIn("No issues detected.", detected)
+        self.assertNotIn("0xFC17", detected)
+        self.assertIn("0xFC17", routine)
+
+    def test_default_question_does_not_presume_failure(self):
+        from btsnoop_parser.llm import DEFAULT_QUESTION
+        self.assertNotIn("Why did", DEFAULT_QUESTION)
+
     def test_no_ansi_escapes(self):
         s = _stats(issues=[_issue()], lifecycle_events=[_event()])
         ctx = build_context(s)

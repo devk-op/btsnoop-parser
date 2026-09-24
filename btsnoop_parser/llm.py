@@ -20,7 +20,10 @@ if TYPE_CHECKING:
     from .analysis import CaptureStats
 
 DEFAULT_BASE_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
-DEFAULT_QUESTION = "Why did this Bluetooth session fail? What is the most likely root cause?"
+DEFAULT_QUESTION = (
+    "What happened in this Bluetooth session? Did anything actually fail, "
+    "and if so, what is the most likely root cause?"
+)
 
 DEFAULT_MAX_ISSUES = 50
 DEFAULT_MAX_EVENTS = 50
@@ -32,9 +35,14 @@ The summary only covers HCI-transport-layer events (connection setup/teardown, c
 errors); it does not parse upper-layer protocol payloads such as A2DP audio or RFCOMM data. If the summary \
 does not contain enough information to answer a question, say so plainly instead of speculating.
 
+Only items under "Detected Issues" are real problems. Items under "Routine Failures" are normal on \
+Android (e.g. probing vendor commands) and are not a root cause on their own. Disconnects with reasons like \
+"Remote User Terminated Connection" or "Connection Terminated By Local Host" are normal endings. If there are \
+no detected issues, say the session looks normal and describe how it ended — do not invent a failure.
+
 When you see an HCI error/status code, explain what it means in plain English using the text already given \
-in the summary. Always structure your answer around: (1) what failed, (2) at what point in the sequence, \
-(3) the likely root cause. Keep your answer concise — a few sentences per point, not an essay."""
+in the summary. If something did fail, structure your answer around: (1) what failed, (2) at what point in \
+the sequence, (3) the likely root cause. Keep your answer concise — a few sentences per point, not an essay."""
 
 
 class ModelUnavailableError(RuntimeError):
@@ -113,12 +121,20 @@ def build_context(
     else:
         lines.append("  No connection events recorded.")
 
+    problems = [i for i in stats.issues if i["level"] != "INFO"]
+    routine = [i for i in stats.issues if i["level"] == "INFO"]
+
     lines.append("")
     lines.append("Detected Issues:")
-    if stats.issues:
-        lines.extend(_format_issues(stats.issues, max_issues))
+    if problems:
+        lines.extend(_format_issues(problems, max_issues))
     else:
         lines.append("  No issues detected.")
+
+    if routine:
+        lines.append("")
+        lines.append("Routine Failures (usually harmless, not a root cause on their own):")
+        lines.extend(_format_issues(routine, max_issues))
 
     return "\n".join(lines)
 

@@ -62,7 +62,8 @@ Options
 .. option:: --question TEXT
 
    Question to ask the LLM about the capture (used with ``--ai``). Defaults
-   to asking why the session failed and what the likely root cause is.
+   to asking what happened, whether anything actually failed, and if so the
+   likely root cause.
 
 .. option:: --base-model NAME
 

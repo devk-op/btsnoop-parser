@@ -39,13 +39,18 @@ Potential Issues (1):
 $ btsnoop_parser capture.log --ai
 
 Loading Qwen/Qwen2.5-1.5B-Instruct (this may take a moment)...
-(1) The LE connection attempt to 11:22:33:44:55:66 (handle 0x002) failed to
-establish. (2) This happened at 09:15:44.230, shortly after a successful
-connection and clean disconnect from a different device (AA:BB:CC:DD:EE:FF).
-(3) The controller reported a Page Timeout, meaning the peer never responded
-to the connection request — most likely it was out of range or powered off,
-not a fault in the local host.
+The Bluetooth session lasted for approximately 3 minutes and 41 seconds. It involved two connections:
+1. **Initial Connection**: On June 1, 2024, at 9:12 AM, a connection was established between device AA:BB:CC:DD:EE:FF (unknown) and another unknown device.
+2. **Disconnection**: At 9:14 PM, the connection was abruptly terminated by the remote device due to a remote user terminating the connection.
+**Detected Issue**: There was a disconnect initiated by the remote device, which resulted from a page timeout during the connection attempt.
+**Root Cause**: The most likely root cause was that the connection attempt timed out before completing successfully. This could have been due to various factors including network latency, insufficient buffer space on either end, or other communication issues preventing the connection from being fully established within the expected time frame.
 ```
+
+That's unedited output from the default 1.5B model for the capture above. It finds the
+real problem (the Page Timeout), but small local models also muddle details: the clean
+disconnect is blamed on the timeout, "9:14 PM" should be AM, and the speculative causes
+at the end are generic. Treat `--ai` as a plain-English starting point and check it
+against `--stats`.
 
 ## Features
 
