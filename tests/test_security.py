@@ -26,7 +26,7 @@ def _link_key_notification_payload(addr: bytes, key: bytes, key_type: int) -> by
 
 def _link_key_request_reply_payload(addr: bytes, key: bytes) -> bytes:
     # [OpcodeLSB, OpcodeMSB, Len, BD_ADDR(6), LinkKey(16)]
-    opcode = 0x040D
+    opcode = 0x040B
     params = addr + key
     return bytes([opcode & 0xFF, (opcode >> 8) & 0xFF, len(params)]) + params
 
@@ -76,9 +76,17 @@ class TestLinkKeyRequestReply(unittest.TestCase):
         self.assertEqual(extract_link_keys([_record(0x01, payload)]), [])
 
     def test_ignores_link_key_request_negative_reply(self):
-        # Opcode 0x040C (negative reply) carries no key — must not be mistaken for 0x040D.
+        # Opcode 0x040C (negative reply) carries no key — must not be mistaken for 0x040B.
         opcode = 0x040C
         payload = bytes([opcode & 0xFF, (opcode >> 8) & 0xFF, 0x06]) + _ADDR_BYTES
+        self.assertEqual(extract_link_keys([_record(0x01, payload)]), [])
+
+    def test_ignores_pin_code_request_reply(self):
+        # Opcode 0x040D is PIN Code Request Reply: BD_ADDR(6) + PIN_Length(1) + PIN(16).
+        # Long enough to look like a link key command, but it's a PIN — must not be reported.
+        opcode = 0x040D
+        params = _ADDR_BYTES + bytes([4]) + b"1234" + bytes(12)
+        payload = bytes([opcode & 0xFF, (opcode >> 8) & 0xFF, len(params)]) + params
         self.assertEqual(extract_link_keys([_record(0x01, payload)]), [])
 
 

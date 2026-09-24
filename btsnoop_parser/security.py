@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 _LINK_KEY_NOTIFICATION_EVENT = 0x18
-_LINK_KEY_REQUEST_REPLY_OPCODE = 0x040D
+_LINK_KEY_REQUEST_REPLY_OPCODE = 0x040B  # OGF 0x01 | OCF 0x000B (0x040D is PIN Code Request Reply)
 
 KEY_TYPE_NAMES = {
     0x00: "Combination key",
