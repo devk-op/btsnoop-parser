@@ -160,5 +160,90 @@ class TestDurationFormat(unittest.TestCase):
         self.assertIn("1h", mock_out.getvalue())
 
 
+
+def _cis_established_payload(status: int, handle: int = 0x060) -> bytes:
+    # [Event(0x3E), Len, Subevent(0x19), Status, HandleLSB, HandleMSB, ...timing params]
+    return bytes([0x3E, 0x1D, 0x19, status, handle & 0xFF, (handle >> 8) & 0xFF]) + bytes(22)
+
+
+def _cmd_status_payload(opcode: int, status: int) -> bytes:
+    # [Event(0x0F), Len, Status, NumCmds, OpcodeLSB, OpcodeMSB]
+    return bytes([0x0F, 0x04, status, 0x01, opcode & 0xFF, (opcode >> 8) & 0xFF])
+
+
+class TestLEAudioStreams(unittest.TestCase):
+    def test_cis_established_and_disconnect_are_paired(self):
+        s = CaptureStats()
+        s.analyze_record(_record(_cis_established_payload(status=0x00)))
+        s.analyze_record(_record(_disconnect_payload(0x060, 0x16)))
+        events = [e["event"] for e in s.lifecycle_events]
+        self.assertEqual(events, ["Connected (LE Audio)", "Disconnected (LE Audio)"])
+        self.assertEqual(s.issues, [])
+
+    def test_handle_reuse_after_cis_is_not_mislabelled(self):
+        s = CaptureStats()
+        s.analyze_record(_record(_cis_established_payload(status=0x00)))
+        s.analyze_record(_record(_disconnect_payload(0x060, 0x16)))
+        s.analyze_record(_record(_disconnect_payload(0x060, 0x13)))
+        self.assertEqual(s.lifecycle_events[-1]["event"], "Disconnected")
+
+    def test_failed_cis_raises_issue(self):
+        s = CaptureStats()
+        s.analyze_record(_record(_cis_established_payload(status=0x3E)))
+        self.assertEqual(s.lifecycle_events[0]["event"], "Connect Failed (LE Audio)")
+        self.assertEqual(s.issues[0]["title"], "LE Audio Stream Failed")
+
+
+class TestFailureSeverity(unittest.TestCase):
+    def _level(self, payload: bytes) -> str:
+        s = CaptureStats()
+        s.analyze_record(_record(payload))
+        return s.issues[0]["level"]
+
+    def test_vendor_specific_failure_is_info(self):
+        s = CaptureStats()
+        s.analyze_record(_record(_cmd_complete_payload(opcode=0xFC17, status=0x01)))
+        self.assertEqual(s.issues[0]["level"], "INFO")
+        self.assertIn("Vendor-specific command 0xFC17", s.issues[0]["detail"])
+
+    def test_known_benign_failures_are_info(self):
+        self.assertEqual(self._level(_cmd_complete_payload(opcode=0x0C12, status=0x12)), "INFO")
+        self.assertEqual(self._level(_cmd_complete_payload(opcode=0x0811, status=0x12)), "INFO")
+        self.assertEqual(self._level(_cmd_status_payload(opcode=0x0811, status=0x12)), "INFO")
+
+    def test_other_failures_stay_error(self):
+        self.assertEqual(self._level(_cmd_complete_payload(opcode=0x0C03, status=0x01)), "ERROR")
+        self.assertEqual(self._level(_cmd_status_payload(opcode=0x0405, status=0x0C)), "ERROR")
+
+
+class TestPrintSummary(unittest.TestCase):
+    def _output(self, stats: CaptureStats, **kwargs) -> str:
+        import io, unittest.mock
+        with unittest.mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            stats.print_summary(**kwargs)
+        return out.getvalue()
+
+    def test_no_color_emits_no_ansi(self):
+        s = CaptureStats()
+        s.analyze_record(_record(_cmd_complete_payload(opcode=0x0C03, status=0x01)))
+        self.assertNotIn("\033[", self._output(s, color=False))
+        self.assertIn("\033[", self._output(s))
+
+    def test_info_listed_separately_from_problems(self):
+        s = CaptureStats()
+        s.analyze_record(_record(_cmd_complete_payload(opcode=0xFC17, status=0x01)))
+        out = self._output(s, color=False)
+        self.assertIn("No obvious issues detected.", out)
+        self.assertIn("Informational (1)", out)
+        self.assertNotIn("Potential Issues", out)
+
+    def test_issue_count_matches_listed_lines(self):
+        s = CaptureStats()
+        s.analyze_record(_record(_disconnect_payload(0x001, 0x08)))  # shown in history, not the list
+        s.analyze_record(_record(_cmd_complete_payload(opcode=0x0C03, status=0x01)))
+        out = self._output(s, color=False)
+        self.assertIn("Potential Issues (1):", out)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -129,7 +129,7 @@ def main() -> None:
 
     if args.stats:
         stats = _build_capture_stats(records)
-        stats.print_summary()
+        stats.print_summary(color=not args.no_color)
         return
 
     if args.ai:

@@ -23,6 +23,8 @@ class TestOpcodeTable(unittest.TestCase):
             0x200C: "LE Set Scan Enable",
             0x2019: "LE Start Encryption",
             0x201A: "LE Long Term Key Request Reply",
+            0x0811: "Sniff Subrating",
+            0x0C56: "Write Simple Pairing Mode",
         }
         for opcode, name in expected.items():
             self.assertEqual(HCI_OPCODE_NAMES.get(opcode), name, hex(opcode))

@@ -172,3 +172,12 @@ def test_cli_link_keys_flag_none_found(mock_parse, mock_extract, mock_stdout):
         main()
 
     assert "No link keys found." in mock_stdout.getvalue()
+
+@patch("btsnoop_parser.cli._build_capture_stats")
+@patch("btsnoop_parser.cli.parse_btsnoop_file")
+def test_cli_stats_no_color_passed_through(mock_parse, mock_build):
+    """--stats --no-color must render the summary without ANSI colors."""
+    mock_parse.return_value = []
+    with patch.object(sys, "argv", ["btsnoop_parser", "test.log", "--stats", "--no-color"]):
+        main()
+    mock_build.return_value.print_summary.assert_called_once_with(color=False)

@@ -95,8 +95,21 @@ def _decode_info(packet_type: int, payload: bytes, direction: str) -> str:
     return f"{send_recv} {_proto_name(packet_type)}"
 
 
+_ANDROID_TS_OFFSET = _dt.timedelta(days=378)
+
+
+def _needs_android_offset_fix(first_ts: _dt.datetime, reference: _dt.datetime) -> bool:
+    # Some Android versions write timestamps 378 days (1 year + 13 days) ahead.
+    # A capture can't postdate its reference time (file mtime or now), so a
+    # first timestamp that does — and lands before it once shifted back — has the bug.
+    slack = _dt.timedelta(days=1)
+    return first_ts > reference + slack and first_ts - _ANDROID_TS_OFFSET <= reference + slack
+
+
 def iter_records(
-    source: Union[str, os.PathLike, bytes, bytearray, memoryview, BinaryIO]
+    source: Union[str, os.PathLike, bytes, bytearray, memoryview, BinaryIO],
+    *,
+    reference_time: Optional[_dt.datetime] = None,
 ) -> Iterator[MutableMapping[str, object]]:
     """
     Yield parsed records from a BTSnoop HCI capture.
@@ -113,14 +126,24 @@ def iter_records(
       - payload / packet_data: payload bytes (alias)
       - original_length, captured_length: integer lengths
       - flags, drops: raw values from the file header
+
+    ``reference_time`` is the latest time the capture could have been taken; it
+    anchors the Android +378-day timestamp correction. It defaults to the file's
+    modification time for paths, and to the current time otherwise.
     """
+    now = _dt.datetime.now(_dt.timezone.utc)
     if isinstance(source, (str, os.PathLike)):
+        if reference_time is None:
+            mtime = _dt.datetime.fromtimestamp(os.path.getmtime(source), _dt.timezone.utc)
+            reference_time = min(mtime, now)
         with open(source, "rb") as fh:
-            yield from iter_records(fh.read())
+            yield from iter_records(fh.read(), reference_time=reference_time)
         return
     if hasattr(source, "read"):
-        yield from iter_records(source.read())
+        yield from iter_records(source.read(), reference_time=reference_time)
         return
+    if reference_time is None:
+        reference_time = now
 
     data = memoryview(source)
     if len(data) < 16:
@@ -136,6 +159,7 @@ def iter_records(
     offset = 16
     index = 0
     first_ts: Optional[_dt.datetime] = None
+    ts_fix: Optional[_dt.timedelta] = None
 
     while offset + 24 <= len(data):
         orig_len, incl_len, flags, drops, timestamp = struct.unpack(
@@ -159,21 +183,10 @@ def iter_records(
 
         try:
             ts = _ts_from_btsnoop(timestamp)
-
-            # --- Heuristic Fix for "Future" Timestamps (Android Bug) ---
-            # Some Android versions record timestamps offset by ~378 days (1 year + 13 days).
-            # This is likely due to an epoch mixup (Julian vs Gregorian or 0000 vs 0001).
-            # If the timestamp is significantly in the future (> 30 days from now),
-            # we check if subtracting 378 days makes it "current".
-            now = _dt.datetime.now(_dt.timezone.utc)
-            if ts > now + _dt.timedelta(days=30):
-                # 378 days = 32,659,200 seconds
-                ts_corrected = ts - _dt.timedelta(days=378)
-                # If the corrected time is within the last year, assume it's the bug and fix it.
-                if now - _dt.timedelta(days=365) < ts_corrected < now + _dt.timedelta(days=1):
-                    ts = ts_corrected
-            # -----------------------------------------------------------
-
+            if ts_fix is None:
+                fix_needed = _needs_android_offset_fix(ts, reference_time)
+                ts_fix = _ANDROID_TS_OFFSET if fix_needed else _dt.timedelta(0)
+            ts -= ts_fix
         except (ValueError, OverflowError, OSError) as exc:
             LOG.error("Skipping record with invalid timestamp %s: %s", timestamp, exc)
             continue
@@ -205,8 +218,7 @@ def iter_records(
 
 def parse_btsnoop_file(filename: Union[str, os.PathLike]) -> list[MutableMapping[str, object]]:
     """Return a list of records parsed from a BTSnoop HCI log."""
-    with open(filename, "rb") as fh:
-        return list(iter_records(fh.read()))
+    return list(iter_records(filename))
 
 
 def print_table(
