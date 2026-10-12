@@ -1,61 +1,93 @@
-"""Deterministic, slot-filled answer templates for the synthetic training set.
+"""Deterministic answers for the synthetic training set.
 
-Each function takes the same facts that end up in the rendered capture
-context (device, handle, error code/name, timestamp, ...) and returns a
-grounded answer text in the "(1) what failed, (2) at what point, (3) root
-cause" structure the SYSTEM_PROMPT asks for. Templates only ever restate
-facts already present in the context — this is what keeps the training data
-free of hallucination without needing a larger model to generate/verify it.
+Every answer only restates facts that appear in the capture summary the model
+is given, plus the short code notes in code_notes.py. Failure answers follow
+the "(1) what failed, (2) when, (3) likely root cause" shape from the system
+prompt; normal sessions say so plainly instead of inventing a problem.
 """
 from __future__ import annotations
 
+from .code_notes import CODE_NOTES
 
-def abnormal_disconnect(*, device: str, handle: str, time: str, error_code: int, error_name: str) -> str:
+
+def _cause(code: int, name: str) -> str:
+    note = CODE_NOTES.get(code)
+    if note:
+        return f"{name} — {note}."
+    return f"the controller reported {name}; the summary gives no more detail than that."
+
+
+def _routine_note(routine: list[str]) -> str:
+    if not routine:
+        return ""
+    items = ", ".join(routine)
     return (
-        f"(1) The connection on handle {handle} to {device} disconnected. "
-        f"(2) This happened at {time}. "
-        f"(3) The disconnect reason was 0x{error_code:02X} ({error_name}), which is not a normal "
-        f"user- or host-initiated termination, so the root cause is: {error_name.lower()}."
+        f"\nThe routine failures listed ({items}) are common on Android and are not a problem by themselves."
     )
 
 
-def le_connection_failed(*, device: str, handle: str, time: str, error_code: int, error_name: str) -> str:
-    return (
-        f"(1) The LE connection attempt to {device} (handle {handle}) failed to establish. "
-        f"(2) The failure occurred at {time}. "
-        f"(3) The controller reported status 0x{error_code:02X} ({error_name}) as the root cause."
+def _failure(what: str, when: str, cause: str, routine: list[str], extra: str = "") -> str:
+    text = f"Yes, something failed.\n(1) What failed: {what}.\n(2) When: {when}.\n(3) Likely root cause: {cause}"
+    if extra:
+        text += f"\n{extra}"
+    return text + _routine_note(routine)
+
+
+def le_connect_failed(*, device, handle, time, code, name, routine, earlier_ok=None):
+    when = f"at {time}"
+    if earlier_ok:
+        when += f", after an earlier connection to {earlier_ok} had ended normally"
+    return _failure(f"the LE connection attempt to {device} (handle {handle})", when, _cause(code, name), routine)
+
+
+def classic_connect_failed(*, device, handle, time, code, name, routine, earlier_ok=None):
+    when = f"at {time}"
+    if earlier_ok:
+        when += f", after an earlier connection to {earlier_ok} had ended normally"
+    return _failure(
+        f"the Classic (BR/EDR) connection attempt to {device} (handle {handle})", when, _cause(code, name), routine
     )
 
 
-def classic_connection_failed(*, device: str, handle: str, time: str, error_code: int, error_name: str) -> str:
-    return (
-        f"(1) The classic BR/EDR connection attempt to {device} (handle {handle}) failed to establish. "
-        f"(2) The failure occurred at {time}. "
-        f"(3) The controller reported status 0x{error_code:02X} ({error_name}) as the root cause."
+def abnormal_disconnect(*, device, handle, kind, connected_at, time, code, name, routine):
+    return _failure(
+        f"the {kind} connection to {device} (handle {handle}) dropped unexpectedly",
+        f"at {time}; it had connected at {connected_at}",
+        _cause(code, name),
+        routine,
+        extra="This was not a normal disconnect requested by either side.",
     )
 
 
-def command_failure(*, opcode_name: str, time: str, error_code: int, error_name: str) -> str:
-    return (
-        f"(1) The HCI command '{opcode_name}' failed. "
-        f"(2) The failure was reported at {time} via a Command Complete event. "
-        f"(3) The status code was 0x{error_code:02X} ({error_name}), which is the root cause of the failure."
+def command_failed(*, opcode_name, time, code, name, routine, via_status):
+    event = "a Command Status event, so the command never started" if via_status else "a Command Complete event"
+    return _failure(
+        f"the HCI command '{opcode_name}'",
+        f"at {time}, reported through {event}",
+        _cause(code, name),
+        routine,
     )
 
 
-def command_status_error(*, opcode_name: str, time: str, error_code: int, error_name: str) -> str:
-    return (
-        f"(1) The HCI command '{opcode_name}' did not start successfully. "
-        f"(2) This was reported at {time} via a Command Status event, before any Command Complete. "
-        f"(3) The status code was 0x{error_code:02X} ({error_name}), which is the root cause."
+def hardware_error(*, time, hw_code, routine):
+    return _failure(
+        "the Bluetooth controller itself",
+        f"at {time}",
+        f"the controller reported hardware error code {hw_code}. This points to a fault in the Bluetooth chip or its "
+        "firmware rather than the other device; the stack usually has to reset the controller to recover.",
+        routine,
     )
 
 
-def hardware_error(*, time: str, error_code: int) -> str:
-    return (
-        f"(1) The Bluetooth controller reported a hardware error. "
-        f"(2) This occurred at {time}. "
-        f"(3) The controller-reported hardware error code was 0x{error_code:02X}. This indicates a "
-        f"low-level fault in the Bluetooth chip/firmware itself, not a protocol negotiation issue — "
-        f"typically not recoverable by the host without a controller reset."
+def audio_stream_failed(*, device, handle, time, code, name, routine):
+    return _failure(
+        f"an LE Audio stream (CIS, handle {handle}) while connected to {device}",
+        f"at {time}",
+        _cause(code, name),
+        routine,
+        extra="The underlying LE connection itself was established.",
     )
+
+
+def normal_session(*, story: str, routine: list[str]) -> str:
+    return f"Nothing failed — the session looks normal. {story}" + _routine_note(routine)

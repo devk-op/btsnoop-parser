@@ -1,119 +1,101 @@
 #!/usr/bin/env python3
-"""Phase 4: sanity-check the LoRA fine-tune against the base model.
+"""Phase 4: score a model (with or without a LoRA adapter) on the holdout set.
 
-Not a full eval harness — a cheap, honest surface-match check: for each
-held-out scenario (built from device/scenario combinations the model never
-saw during training), does the generated answer mention the correct HCI
-error code and device/handle? Run both the base model and the LoRA-adapted
-model over the same held-out set and compare.
+The holdout set uses devices and status codes that never appear in training.
+A failure answer counts as correct when it contains every key fact for that
+scenario (device address, status-code name, command name, or hardware code).
+A normal-session answer counts as correct when it clearly says nothing failed.
+This is a cheap surface check, not a full judgement of answer quality — read
+the saved answers too.
 
 Usage:
-    python3 training/evaluate.py
-    python3 training/evaluate.py --sample 15   # print a few full answers too
+    python3 training/evaluate.py --model Qwen/Qwen2.5-0.5B-Instruct
+    python3 training/evaluate.py --model Qwen/Qwen2.5-0.5B-Instruct \
+        --adapter training/checkpoints/Qwen2.5-0.5B-Instruct-lora
 """
 from __future__ import annotations
 
 import argparse
+import collections
 import json
-import re
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from btsnoop_parser.llm import DEFAULT_BASE_MODEL, SYSTEM_PROMPT
+from btsnoop_parser.llm import SYSTEM_PROMPT
 
 DATA_PATH = ROOT / "training" / "data" / "eval_holdout.jsonl"
-ADAPTER_PATH = ROOT / "training" / "checkpoints" / "hci-rootcause-lora"
+RESULTS_DIR = ROOT / "training" / "checkpoints" / "eval"
 
-_HEX_RE = re.compile(r"0x[0-9A-Fa-f]{2}\b")
-_MAC_RE = re.compile(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
-
-
-def _expected_facts(answer: str) -> set[str]:
-    facts = {m.upper() for m in _HEX_RE.findall(answer)}
-    facts |= {m.upper() for m in _MAC_RE.findall(answer)}
-    return facts
+NORMAL_PHRASES = ("looks normal", "nothing failed", "no issues", "no detected issues", "no problems",
+                  "did not fail", "no failure", "no significant")
 
 
-def _load_holdout() -> list[dict]:
-    if not DATA_PATH.exists():
-        raise SystemExit(f"No holdout data at {DATA_PATH} — run training/generate_dataset.py first.")
-    with open(DATA_PATH) as f:
-        return [json.loads(line) for line in f if line.strip()]
-
-
-def _load_model(adapter_path: str | None):
-    import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    tokenizer = AutoTokenizer.from_pretrained(DEFAULT_BASE_MODEL)
-    model = AutoModelForCausalLM.from_pretrained(DEFAULT_BASE_MODEL)
-
-    if adapter_path:
-        from peft import PeftModel
-        model = PeftModel.from_pretrained(model, adapter_path)
-
-    device = "mps" if torch.backends.mps.is_available() else "cpu"
-    model = model.to(device).eval()
-    return tokenizer, model, device
-
-
-def _generate(tokenizer, model, device, user_content: str) -> str:
-    import torch
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_content},
-    ]
-    inputs = tokenizer.apply_chat_template(
-        messages, add_generation_prompt=True, return_dict=True, return_tensors="pt"
-    ).to(device)
-    with torch.no_grad():
-        output = model.generate(**inputs, max_new_tokens=400, do_sample=False, pad_token_id=tokenizer.eos_token_id)
-    return tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True).strip()
-
-
-def _score(tag: str, tokenizer, model, device, examples: list[dict], sample: int) -> None:
-    hits, total = 0, 0
-    printed = 0
-    for ex in examples:
-        expected = _expected_facts(ex["output"])
-        if not expected:
-            continue
-        generated = _generate(tokenizer, model, device, ex["input"])
-        found = {fact for fact in expected if fact in generated.upper()}
-        total += 1
-        if found == expected:
-            hits += 1
-        if printed < sample:
-            print(f"\n[{tag}] expected facts: {sorted(expected)} | matched: {sorted(found)}")
-            print(f"  -> {generated[:200]}")
-            printed += 1
-    accuracy = hits / total if total else 0.0
-    print(f"\n{tag}: {hits}/{total} held-out scenarios fully matched ({accuracy:.0%})")
+def _correct(answer: str, facts: list[str]) -> bool:
+    text = answer.lower()
+    if facts == ["NORMAL"]:
+        return any(p in text for p in NORMAL_PHRASES)
+    return all(f.lower() in text for f in facts)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--sample", type=int, default=0, help="Print this many full answers per model")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--model", required=True, help="Base model id or local folder")
+    parser.add_argument("--adapter", help="LoRA adapter folder")
+    parser.add_argument("--limit", type=int, help="Only score the first N holdout examples")
+    parser.add_argument("--max-new-tokens", type=int, default=250)
     args = parser.parse_args()
 
-    examples = _load_holdout()
-    print(f"Evaluating on {len(examples)} held-out scenarios\n")
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    print("=== Base model (no LoRA) ===")
-    tokenizer, model, device = _load_model(adapter_path=None)
-    _score("base", tokenizer, model, device, examples, args.sample)
-    del model
+    with open(DATA_PATH) as f:
+        examples = [json.loads(line) for line in f if line.strip()][: args.limit]
 
-    if ADAPTER_PATH.exists():
-        print("\n=== LoRA-adapted model ===")
-        tokenizer, model, device = _load_model(adapter_path=str(ADAPTER_PATH))
-        _score("lora", tokenizer, model, device, examples, args.sample)
-    else:
-        print(f"\nNo adapter found at {ADAPTER_PATH.relative_to(ROOT)} — run training/train_lora.py to compare.")
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    model = AutoModelForCausalLM.from_pretrained(args.model)
+    if args.adapter:
+        from peft import PeftModel
+        # Merging folds the LoRA weights into the base layers, so generation runs at base-model speed.
+        model = PeftModel.from_pretrained(model, args.adapter).merge_and_unload()
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    model = model.to(device).eval()
+
+    label = Path(args.model).name + ("+lora" if args.adapter else "")
+    print(f"Scoring {label} on {len(examples)} holdout examples ({device})")
+    by_kind: dict[str, list[bool]] = collections.defaultdict(list)
+    rows = []
+    started = time.time()
+    for i, ex in enumerate(examples, 1):
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": ex["input"]}]
+        inputs = tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, return_dict=True, return_tensors="pt"
+        ).to(device)
+        with torch.no_grad():
+            out = model.generate(**inputs, max_new_tokens=args.max_new_tokens, do_sample=False,
+                                 pad_token_id=tokenizer.eos_token_id)
+        answer = tokenizer.decode(out[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True).strip()
+        ok = _correct(answer, ex["facts"])
+        by_kind[ex["kind"]].append(ok)
+        rows.append({"kind": ex["kind"], "facts": ex["facts"], "correct": ok, "answer": answer, "expected": ex["output"]})
+        if i % 10 == 0:
+            print(f"  {i}/{len(examples)} done ({time.time() - started:.0f}s)")
+
+    print(f"\n{label}")
+    total = [ok for oks in by_kind.values() for ok in oks]
+    for kind, oks in sorted(by_kind.items()):
+        print(f"  {kind:22} {sum(oks):3d}/{len(oks):<3d} {sum(oks) / len(oks):6.0%}")
+    print(f"  {'OVERALL':22} {sum(total):3d}/{len(total):<3d} {sum(total) / len(total):6.0%}")
+    print(f"  ({(time.time() - started) / len(examples):.1f}s per answer)")
+
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = RESULTS_DIR / f"{label}.jsonl"
+    with open(path, "w") as f:
+        f.writelines(json.dumps(r) + "\n" for r in rows)
+    print(f"Answers saved to {path.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":
