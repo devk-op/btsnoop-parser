@@ -67,6 +67,11 @@ def main() -> None:
         help="Analyze capture and show high-level statistics and issues",
     )
     parser.add_argument(
+        "--protocols",
+        action="store_true",
+        help="Decode the protocols above HCI (L2CAP channels, RFCOMM, HFP) into a timeline",
+    )
+    parser.add_argument(
         "--ai",
         action="store_true",
         help="Analyze capture issues with a local LLM (requires the 'ai' extra)",
@@ -130,6 +135,14 @@ def main() -> None:
     if args.stats:
         stats = _build_capture_stats(records)
         stats.print_summary(color=not args.no_color)
+        return
+
+    if args.protocols:
+        from .protocols import ProtocolTrace, print_trace
+        trace = ProtocolTrace()
+        for record in records:
+            trace.analyze_record(record)
+        print_trace(trace, color=not args.no_color)
         return
 
     if args.ai:

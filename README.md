@@ -59,6 +59,7 @@ against `--stats`.
 - **`--filter`** — filter by packet type and direction before processing.
 - **`--pcap`** — export to PCAP (link type 201) for Wireshark / tshark.
 - **`--stats`** — connection history, device list, and issue detection.
+- **`--protocols`** — timeline of what the devices said above HCI: L2CAP channels, RFCOMM serial ports, HFP commands in plain English, voice links.
 - **`--ai`** — ask a local LLM to diagnose capture issues in plain English (fully offline, optional extra).
 - **`--link-keys`** — extract Classic BT link keys seen in HCI traffic (for use with your own authorized captures).
 - Decodes common HCI command/event payloads.
@@ -97,6 +98,9 @@ btsnoop_parser capture.log --pcap full.pcap
 
 # Capture statistics and issue detection
 btsnoop_parser capture.log --stats
+
+# Decode the protocols above HCI (L2CAP channels, RFCOMM ports, HFP commands)
+btsnoop_parser capture.log --protocols
 
 # Ask a local LLM to diagnose issues — requires `pip install "btsnoop-parser[ai]"`
 # Only the decoded/summarized capture is sent to the model (not raw packets),

@@ -52,6 +52,13 @@ Options
    Analyse the capture and print connection history, detected devices, and
    potential issues.
 
+.. option:: --protocols
+
+   Decode the protocols carried above HCI and print a timeline: L2CAP channels
+   opening and closing (labelled SDP, RFCOMM, AVDTP, ATT, ...), RFCOMM serial
+   ports, HFP commands with a plain-English meaning, and voice (SCO/eSCO) links.
+   Needs a capture that includes ACL data.
+
 .. option:: --ai
 
    Ask a local LLM to diagnose capture issues in plain English. Requires the
@@ -108,6 +115,9 @@ Examples
 
    # Capture statistics and issue detection
    btsnoop_parser capture.log --stats
+
+   # What the devices said above HCI: channels, serial ports, HFP commands
+   btsnoop_parser capture.log --protocols
 
    # Ask a local LLM to diagnose issues (requires the 'ai' extra)
    btsnoop_parser capture.log --ai

@@ -181,3 +181,15 @@ def test_cli_stats_no_color_passed_through(mock_parse, mock_build):
     with patch.object(sys, "argv", ["btsnoop_parser", "test.log", "--stats", "--no-color"]):
         main()
     mock_build.return_value.print_summary.assert_called_once_with(color=False)
+
+
+@patch("sys.stdout", new_callable=StringIO)
+@patch("btsnoop_parser.cli.parse_btsnoop_file")
+def test_cli_protocols_prints_timeline(mock_parse, mock_stdout):
+    """--protocols decodes the records and prints the protocol view without colors."""
+    mock_parse.return_value = []
+    with patch.object(sys, "argv", ["btsnoop_parser", "test.log", "--protocols", "--no-color"]):
+        main()
+    output = mock_stdout.getvalue()
+    assert "Protocol Timeline" in output
+    assert "\033[" not in output
