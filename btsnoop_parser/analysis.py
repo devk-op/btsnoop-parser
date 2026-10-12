@@ -179,6 +179,21 @@ class CaptureStats:
                             "details": f"Device: {bd_addr}",
                             "is_error": False
                         })
+                    else:
+                        err_str = HCI_ERROR_CODES.get(status, f"0x{status:02X}")
+                        self.lifecycle_events.append({
+                            "timestamp": ts,
+                            "event": "Connect Failed (LE)",
+                            "handle": f"0x{handle:03X}",
+                            "details": f"Device: {bd_addr} — {err_str}",
+                            "is_error": True,
+                        })
+                        self.issues.append({
+                            "timestamp": ts,
+                            "level": "WARN",
+                            "title": "LE Connection Failed",
+                            "detail": f"Failed to connect to {bd_addr}: {err_str}",
+                        })
 
                 # LE CIS Established (0x19) - LE Audio isochronous stream
                 # Payload: [Subevent(2), Status(3), Handle(4,5), ...]

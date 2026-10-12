@@ -93,6 +93,26 @@ class TestLEConnectionFailed(unittest.TestCase):
         self.assertEqual(s.lifecycle_events[0]["event"], "Connected (LE)")
 
 
+class TestLEEnhancedConnection(unittest.TestCase):
+    def _payload(self, status: int) -> bytes:
+        # [Event(0x3E), Len, Subevent(0x0A), Status, Handle(2), Role, AddrType, Addr(6), ...]
+        return bytes([0x3E, 0x1F, 0x0A, status, 0x40, 0x00, 0x00, 0x00]) + b"\x11\x22\x33\x44\x55\x66" + bytes(19)
+
+    def test_success(self):
+        s = CaptureStats()
+        s.analyze_record(_record(self._payload(0x00)))
+        self.assertEqual(s.lifecycle_events[0]["event"], "Connected (LE Enhanced)")
+        self.assertEqual(s.issues, [])
+
+    def test_failure_is_reported(self):
+        s = CaptureStats()
+        s.analyze_record(_record(self._payload(0x3E)))
+        self.assertEqual(s.lifecycle_events[0]["event"], "Connect Failed (LE)")
+        self.assertTrue(s.lifecycle_events[0]["is_error"])
+        self.assertEqual(s.issues[0]["title"], "LE Connection Failed")
+        self.assertIn("66:55:44:33:22:11", s.issues[0]["detail"])
+
+
 class TestClassicConnectionFailed(unittest.TestCase):
     def test_failed_classic_connection_appears_in_lifecycle(self):
         s = CaptureStats()

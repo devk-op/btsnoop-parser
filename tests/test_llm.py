@@ -170,7 +170,10 @@ class TestAsk(unittest.TestCase):
         torch_mock, transformers_mock, tokenizer_mock, model_mock = self._mock_transformers()
         peft_mock = MagicMock()
         peft_model_mock = MagicMock()
-        peft_model_mock.to.return_value = peft_model_mock
+        merged_mock = MagicMock()
+        merged_mock.to.return_value = merged_mock
+        peft_model_mock.merge_and_unload.return_value = merged_mock
+        merged_mock.generate.return_value = [MagicMock()]
         peft_mock.PeftModel.from_pretrained.return_value = peft_model_mock
 
         with patch.dict(sys.modules, {"torch": torch_mock, "transformers": transformers_mock, "peft": peft_mock}):
@@ -178,6 +181,8 @@ class TestAsk(unittest.TestCase):
                 ask(_stats(), adapter_path="/fake/adapter")
 
         peft_mock.PeftModel.from_pretrained.assert_called_once_with(model_mock, "/fake/adapter")
+        peft_model_mock.merge_and_unload.assert_called_once()
+        merged_mock.generate.assert_called_once()
 
 
 if __name__ == "__main__":

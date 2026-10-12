@@ -176,7 +176,8 @@ def ask(
                 "The 'peft' package is required to use --adapter-path. "
                 'Install it with: pip install "btsnoop-parser[ai]"'
             ) from exc
-        model = PeftModel.from_pretrained(model, adapter_path)
+        # Fold the adapter into the base weights; unmerged LoRA layers make generation several times slower.
+        model = PeftModel.from_pretrained(model, adapter_path).merge_and_unload()
     elif adapter_path:
         print(
             f"Warning: adapter path '{adapter_path}' not found — falling back to the base model.",
