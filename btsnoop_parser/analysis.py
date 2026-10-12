@@ -55,6 +55,8 @@ class CaptureStats:
         self.lifecycle_events: list[dict[str, Any]] = [] # Connects and Disconnects
         self.issues: list[dict[str, Any]] = []
         self._cis_handles: set[int] = set()
+        self._handle_devices: dict[int, str] = {}  # connection handle -> address
+        self._cis_devices: dict[int, str] = {}  # LE Audio stream handle -> address of the device it serves
 
     def _track_device(self, addr: str, name: Optional[str] = None):
         """Register a device address and update its name if available."""
@@ -79,6 +81,18 @@ class CaptureStats:
             self.start_time = ts
         if self.end_time is None or ts > self.end_time:
             self.end_time = ts
+
+        # LE Create CIS names the connection each audio stream belongs to.
+        # Payload: [OpcodeLSB(0), OpcodeMSB(1), Len(2), Count(3), then CISHandle(2) + ACLHandle(2) per stream]
+        if record["packet_type"] == 0x01:
+            payload = record["payload"]
+            if len(payload) >= 4 and payload[0] | (payload[1] << 8) == 0x2064:
+                for offset in range(4, min(len(payload), 4 + 4 * payload[3]) - 3, 4):
+                    cis_handle = (payload[offset] | (payload[offset + 1] << 8)) & 0x0FFF
+                    acl_handle = (payload[offset + 2] | (payload[offset + 3] << 8)) & 0x0FFF
+                    if acl_handle in self._handle_devices:
+                        self._cis_devices[cis_handle] = self._handle_devices[acl_handle]
+            return
 
         # --- Issue Detection ---
         
@@ -112,6 +126,7 @@ class CaptureStats:
                 _normal_reasons = (0x00, 0x13, 0x14, 0x15, 0x16)
                 is_cis = handle in self._cis_handles
                 self._cis_handles.discard(handle)
+                self._handle_devices.pop(handle, None)
                 self.lifecycle_events.append({
                     "timestamp": ts,
                     "event": "Disconnected (LE Audio)" if is_cis else "Disconnected",
@@ -141,6 +156,7 @@ class CaptureStats:
                     
                     if status == 0x00:
                         self._track_device(bd_addr)
+                        self._handle_devices[handle] = bd_addr
                         self.lifecycle_events.append({
                             "timestamp": ts,
                             "event": "Connected (LE)",
@@ -174,6 +190,7 @@ class CaptureStats:
                     
                     if status == 0x00:
                         self._track_device(bd_addr)
+                        self._handle_devices[handle] = bd_addr
                         self.lifecycle_events.append({
                             "timestamp": ts,
                             "event": "Connected (LE Enhanced)",
@@ -198,19 +215,28 @@ class CaptureStats:
                             "code": status,
                         })
 
+                # LE CIS Request (0x1A) - the other device asks to start an audio stream
+                # Payload: [Subevent(2), ACLHandle(3,4), CISHandle(5,6), ...]
+                elif subevent == 0x1A and len(payload) >= 7:
+                    acl_handle = payload[3] | (payload[4] << 8)
+                    if acl_handle in self._handle_devices:
+                        self._cis_devices[payload[5] | (payload[6] << 8)] = self._handle_devices[acl_handle]
+
                 # LE CIS Established (0x19) - LE Audio isochronous stream
                 # Payload: [Subevent(2), Status(3), Handle(4,5), ...]
                 elif subevent == 0x19 and len(payload) >= 6:
                     status = payload[3]
                     handle = payload[4] | (payload[5] << 8)
+                    device = self._cis_devices.get(handle)
                     if status == 0x00:
                         self._cis_handles.add(handle)
                         self.lifecycle_events.append({
                             "timestamp": ts,
                             "event": "Connected (LE Audio)",
                             "handle": f"0x{handle:03X}",
-                            "details": "Audio stream (CIS) established",
+                            "details": "Audio stream (CIS) established" + (f" with {device}" if device else ""),
                             "is_error": False,
+                            "device": device,
                         })
                     else:
                         err_str = HCI_ERROR_CODES.get(status, f"0x{status:02X}")
@@ -237,6 +263,7 @@ class CaptureStats:
                 self._track_device(bd_addr)
                 
                 if status == 0x00:
+                    self._handle_devices[handle] = bd_addr
                     self.lifecycle_events.append({
                         "timestamp": ts,
                         "event": "Connected (Classic)",

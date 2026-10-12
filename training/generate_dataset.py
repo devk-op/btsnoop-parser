@@ -108,8 +108,8 @@ class Session:
     def event(self, payload: bytes, gap: float = 0.05) -> datetime.datetime:
         return self._add(0x04, payload, gap)
 
-    def command(self, opcode: int, gap: float = 0.01) -> None:
-        self._add(0x01, bytes([opcode & 0xFF, opcode >> 8, 0]), gap)
+    def command(self, opcode: int, gap: float = 0.01, params: bytes = b"") -> None:
+        self._add(0x01, bytes([opcode & 0xFF, opcode >> 8, len(params)]) + params, gap)
 
     def traffic(self, n: int) -> None:
         for _ in range(n):
@@ -137,9 +137,12 @@ class Session:
         return self.event(bytes([0x03, 0x0B, status, handle & 0xFF, handle >> 8]) + addr + bytes([0x01, 0x00]),
                           gap=self.rng.uniform(0.2, 5.0))
 
-    def cis(self, handle: int, status: int) -> datetime.datetime:
+    def cis(self, handle: int, status: int, acl_handle: int) -> datetime.datetime:
+        # LE Create CIS ties the stream to its connection, which is how the summary knows the device.
+        self.command(0x2064, gap=self.rng.uniform(1.0, 30.0),
+                     params=bytes([0x01, handle & 0xFF, handle >> 8, acl_handle & 0xFF, acl_handle >> 8]))
         return self.event(bytes([0x3E, 0x1D, 0x19, status, handle & 0xFF, handle >> 8]) + bytes(22),
-                          gap=self.rng.uniform(1.0, 30.0))
+                          gap=self.rng.uniform(0.02, 0.4))
 
     def disconnect(self, handle: int, reason: int, gap: float | None = None) -> datetime.datetime:
         return self.event(bytes([0x05, 0x04, 0x00, handle & 0xFF, handle >> 8, reason]),
@@ -164,11 +167,11 @@ class Session:
         return [label for _, label in picked]
 
 
-def _audio_streams(s: Session, count: int, keep_last_open: bool) -> int | None:
+def _audio_streams(s: Session, acl_handle: int, count: int, keep_last_open: bool) -> int | None:
     """Start and stop LE Audio streams; optionally leave the last one running and return its handle."""
     handle = s.handle("cis") if count else None
     for i in range(count):
-        s.cis(handle, 0x00)
+        s.cis(handle, 0x00, acl_handle)
         s.traffic(s.rng.randrange(1, 4))
         if i == count - 1 and keep_last_open:
             return handle
@@ -202,7 +205,7 @@ def _normal_part(s: Session, mac: str) -> str:
     streams = 0
     if kind != "classic" and rng.random() < 0.6:
         streams = rng.randrange(1, 7)
-        open_stream = _audio_streams(s, streams, keep_last_open=rng.random() < 0.5)
+        open_stream = _audio_streams(s, handles[0], streams, keep_last_open=rng.random() < 0.5)
         if open_stream is not None:
             s.disconnect(open_stream, reason)
 
@@ -314,11 +317,12 @@ def scenario_audio_fail(s: Session, devices: list[str], codes: list[int]):
     routine = s.routine_noise()
     mac, code = s.rng.choice(devices), s.rng.choice(codes)
     _earlier_ok(s, devices, mac)
-    s.le_connect(mac, s.handle("le"), 0x00, enhanced=True)
+    acl_handle = s.handle("le")
+    s.le_connect(mac, acl_handle, 0x00, enhanced=True)
     s.traffic(s.rng.randrange(2, 6))
-    _audio_streams(s, s.rng.randrange(0, 3), keep_last_open=False)
+    _audio_streams(s, acl_handle, s.rng.randrange(0, 3), keep_last_open=False)
     handle = s.handle("cis")
-    t = s.cis(handle, code)
+    t = s.cis(handle, code, acl_handle)
     name = HCI_ERROR_CODES[code]
     answer = tmpl.audio_stream_failed(device=mac, handle=f"0x{handle:03X}", time=_hhmmss(t), code=code,
                                       name=name, routine=routine)

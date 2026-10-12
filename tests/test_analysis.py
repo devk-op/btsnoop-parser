@@ -265,6 +265,36 @@ class TestPrintSummary(unittest.TestCase):
         self.assertIn("Potential Issues (1):", out)
 
 
+class TestLEAudioStreamDevice(unittest.TestCase):
+    def _connected(self) -> CaptureStats:
+        s = CaptureStats()
+        s.analyze_record(_record(_le_conn_complete_payload(0x00, handle=0x040)))
+        return s
+
+    def _established(self, s: CaptureStats) -> dict:
+        s.analyze_record(_record(bytes([0x3E, 0x1D, 0x19, 0x00, 0x60, 0x00]) + bytes(22)))
+        return s.lifecycle_events[-1]
+
+    def test_create_cis_command_names_the_device(self):
+        s = self._connected()
+        # [LE Create CIS, Len, Count, CISHandle(2), ACLHandle(2)]
+        command = dict(_record(bytes([0x64, 0x20, 0x05, 0x01, 0x60, 0x00, 0x40, 0x00])), packet_type=0x01)
+        s.analyze_record(command)
+        event = self._established(s)
+        self.assertEqual(event["device"], "66:55:44:33:22:11")
+        self.assertEqual(event["details"], "Audio stream (CIS) established with 66:55:44:33:22:11")
+
+    def test_cis_request_event_names_the_device(self):
+        s = self._connected()
+        s.analyze_record(_record(bytes([0x3E, 0x08, 0x1A, 0x40, 0x00, 0x60, 0x00, 0x00, 0x00])))
+        self.assertEqual(self._established(s)["device"], "66:55:44:33:22:11")
+
+    def test_stream_without_known_connection(self):
+        event = self._established(CaptureStats())
+        self.assertIsNone(event["device"])
+        self.assertEqual(event["details"], "Audio stream (CIS) established")
+
+
 class TestHardwareError(unittest.TestCase):
     def test_reports_the_hardware_code_not_the_length_byte(self):
         s = CaptureStats()

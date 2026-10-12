@@ -10,6 +10,7 @@ Nothing in this module is imported eagerly by the rest of the package —
 """
 from __future__ import annotations
 
+import collections
 import os
 import re
 import sys
@@ -121,6 +122,13 @@ def build_context(
     if stats.devices:
         devices = ", ".join(f"{addr} ({name})" for addr, name in stats.devices.items())
         lines.append(f"  Devices: {devices}")
+
+    streams = collections.Counter(
+        e.get("device") or "unknown device" for e in stats.lifecycle_events if e["event"] == "Connected (LE Audio)"
+    )
+    if streams:
+        counts = ", ".join(f"{device} = {count}" for device, count in streams.items())
+        lines.append(f"  LE Audio Streams Started: {counts}")
 
     lines.append("")
     lines.append("Connection History:")

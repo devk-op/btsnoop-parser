@@ -97,6 +97,15 @@ class TestBuildContext(unittest.TestCase):
         ctx = build_context(_stats(issues=[routine, unknown, _issue()]))
         self.assertNotIn("Status Code Notes:", ctx)
 
+    def test_le_audio_stream_counts_per_device(self):
+        streams = [dict(_event(event="Connected (LE Audio)"), device="AA:BB:CC:11:22:33") for _ in range(3)]
+        unknown = _event(event="Connected (LE Audio)")
+        ctx = build_context(_stats(lifecycle_events=[*streams, unknown]))
+        self.assertIn("LE Audio Streams Started: AA:BB:CC:11:22:33 = 3, unknown device = 1", ctx)
+
+    def test_no_stream_line_without_le_audio(self):
+        self.assertNotIn("LE Audio Streams", build_context(_stats(lifecycle_events=[_event()])))
+
     def test_default_question_does_not_presume_failure(self):
         from btsnoop_parser.llm import DEFAULT_QUESTION
         self.assertNotIn("Why did", DEFAULT_QUESTION)
