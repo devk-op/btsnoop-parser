@@ -11,6 +11,7 @@ Nothing in this module is imported eagerly by the rest of the package —
 from __future__ import annotations
 
 import os
+import re
 import sys
 from typing import TYPE_CHECKING, Optional
 
@@ -46,6 +47,10 @@ When you see an HCI error/status code, explain what it means in plain English us
 in the summary. If the summary has a "Status Code Notes" entry for the code, base the explanation on it; if it \
 has none, name the code without guessing a cause. If something did fail, structure your answer around: (1) what failed, (2) at what point in \
 the sequence, (3) the likely root cause. Keep your answer concise — a few sentences per point, not an essay."""
+
+
+# "owner/name": an adapter published on the Hugging Face Hub rather than a local folder.
+_HUB_REPO_ID = re.compile(r"^[A-Za-z0-9][\w.-]*/[\w.-]+$")
 
 
 class ModelUnavailableError(RuntimeError):
@@ -158,8 +163,8 @@ def ask(
 ) -> str:
     """Ask a local Hugging Face model to explain a capture's issues.
 
-    Loads `base_model` (optionally wrapped with a LoRA adapter from
-    `adapter_path`, if given and present) and generates an answer grounded in
+    Loads `base_model` (optionally specialized with a LoRA adapter from
+    `adapter_path` — a local folder or a Hugging Face repo id) and generates an answer grounded in
     a text summary of `stats`. Runs entirely locally — no network access
     beyond the one-time Hugging Face Hub model download.
     """
@@ -177,7 +182,7 @@ def ask(
     tokenizer = AutoTokenizer.from_pretrained(base_model)
     model = AutoModelForCausalLM.from_pretrained(base_model)
 
-    if adapter_path and os.path.isdir(adapter_path):
+    if adapter_path and (os.path.isdir(adapter_path) or _HUB_REPO_ID.match(adapter_path)):
         try:
             from peft import PeftModel
         except ImportError as exc:
@@ -185,8 +190,14 @@ def ask(
                 "The 'peft' package is required to use --adapter-path. "
                 'Install it with: pip install "btsnoop-parser[ai]"'
             ) from exc
-        # Fold the adapter into the base weights; unmerged LoRA layers make generation several times slower.
-        model = PeftModel.from_pretrained(model, adapter_path).merge_and_unload()
+        try:
+            # Fold the adapter into the base weights; unmerged LoRA layers make generation several times slower.
+            model = PeftModel.from_pretrained(model, adapter_path).merge_and_unload()
+        except (OSError, ValueError) as exc:
+            print(
+                f"Warning: could not load adapter '{adapter_path}' ({exc}) — falling back to the base model.",
+                file=sys.stderr,
+            )
     elif adapter_path:
         print(
             f"Warning: adapter path '{adapter_path}' not found — falling back to the base model.",

@@ -168,6 +168,11 @@ just the base model, or you can specialize it further by fine-tuning a LoRA
 adapter on your own — see [`training/README.md`](training/README.md) for a
 full walkthrough (dataset generation, LoRA training with `peft`, evaluation).
 
+`--base-model` takes a Hugging Face model id or a local model folder; set
+`BTSNOOP_AI_MODEL` to change the default. `--adapter-path` takes a local adapter
+folder or a Hugging Face repo id. Downloaded models are cached, and
+`HF_HUB_OFFLINE=1` skips the network check on later runs.
+
 ## Link key extraction (`--link-keys`)
 
 Classic Bluetooth (BR/EDR) link keys pass over HCI in the clear — the

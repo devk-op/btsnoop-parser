@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import sys
 from typing import Any
 
@@ -86,13 +87,16 @@ def main() -> None:
         "--base-model",
         metavar="NAME",
         default=None,
-        help="Hugging Face model id to use for --ai (default: Qwen/Qwen2.5-1.5B-Instruct)",
+        help=(
+            "Hugging Face model id or local model folder to use for --ai "
+            "(default: $BTSNOOP_AI_MODEL if set, else Qwen/Qwen2.5-1.5B-Instruct)"
+        ),
     )
     parser.add_argument(
         "--adapter-path",
         metavar="DIR",
         default=None,
-        help="Path to a LoRA adapter directory to specialize the --ai model",
+        help="LoRA adapter to specialize the --ai model: a local folder or a Hugging Face repo id",
     )
     parser.add_argument(
         "--link-keys",
@@ -153,7 +157,7 @@ def main() -> None:
             ModelUnavailableError,
             ask,
         )
-        base_model = args.base_model or DEFAULT_BASE_MODEL
+        base_model = args.base_model or os.environ.get("BTSNOOP_AI_MODEL") or DEFAULT_BASE_MODEL
         print(f"Loading {base_model} (this may take a moment)...", file=sys.stderr)
         try:
             answer = ask(

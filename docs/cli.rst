@@ -74,13 +74,14 @@ Options
 
 .. option:: --base-model NAME
 
-   Hugging Face model id to use for ``--ai`` (default:
-   ``Qwen/Qwen2.5-1.5B-Instruct``).
+   Hugging Face model id, or the path of a local model folder, to use for
+   ``--ai``. Defaults to the ``BTSNOOP_AI_MODEL`` environment variable if it
+   is set, otherwise ``Qwen/Qwen2.5-1.5B-Instruct``.
 
 .. option:: --adapter-path DIR
 
-   Path to a LoRA adapter directory to specialize the ``--ai`` model — see
-   ``training/README.md`` for how to fine-tune one.
+   LoRA adapter to specialize the ``--ai`` model: a local folder or a Hugging
+   Face repo id — see ``training/README.md`` for how to train one.
 
 .. option:: --link-keys
 

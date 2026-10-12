@@ -193,3 +193,17 @@ def test_cli_protocols_prints_timeline(mock_parse, mock_stdout):
     output = mock_stdout.getvalue()
     assert "Protocol Timeline" in output
     assert "\033[" not in output
+
+
+@patch("sys.stdout", new_callable=StringIO)
+@patch("btsnoop_parser.llm.ask", return_value="answer")
+@patch("btsnoop_parser.cli.parse_btsnoop_file", return_value=[])
+def test_cli_ai_model_from_environment(mock_parse, mock_ask, mock_stdout):
+    """BTSNOOP_AI_MODEL sets the default --ai model; --base-model still wins."""
+    with patch.dict("os.environ", {"BTSNOOP_AI_MODEL": "/models/local-qwen"}):
+        with patch.object(sys, "argv", ["btsnoop_parser", "test.log", "--ai"]):
+            main()
+        assert mock_ask.call_args.kwargs["base_model"] == "/models/local-qwen"
+        with patch.object(sys, "argv", ["btsnoop_parser", "test.log", "--ai", "--base-model", "other/model"]):
+            main()
+        assert mock_ask.call_args.kwargs["base_model"] == "other/model"

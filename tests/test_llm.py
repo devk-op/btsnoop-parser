@@ -196,6 +196,31 @@ class TestAsk(unittest.TestCase):
         peft_model_mock.merge_and_unload.assert_called_once()
         merged_mock.generate.assert_called_once()
 
+    def test_ask_loads_adapter_from_hub_repo_id(self):
+        torch_mock, transformers_mock, tokenizer_mock, model_mock = self._mock_transformers()
+        peft_mock = MagicMock()
+        merged_mock = peft_mock.PeftModel.from_pretrained.return_value.merge_and_unload.return_value
+        merged_mock.to.return_value = merged_mock
+        merged_mock.generate.return_value = [MagicMock()]
+
+        with patch.dict(sys.modules, {"torch": torch_mock, "transformers": transformers_mock, "peft": peft_mock}):
+            ask(_stats(), adapter_path="someone/hci-adapter")
+
+        peft_mock.PeftModel.from_pretrained.assert_called_once_with(model_mock, "someone/hci-adapter")
+
+    def test_ask_falls_back_when_hub_adapter_cannot_be_loaded(self):
+        torch_mock, transformers_mock, tokenizer_mock, model_mock = self._mock_transformers()
+        peft_mock = MagicMock()
+        peft_mock.PeftModel.from_pretrained.side_effect = OSError("repo not found")
+
+        with patch.dict(sys.modules, {"torch": torch_mock, "transformers": transformers_mock, "peft": peft_mock}):
+            with patch("sys.stderr") as mock_stderr:
+                answer = ask(_stats(), adapter_path="someone/missing")
+
+        warned = "".join(call.args[0] for call in mock_stderr.write.call_args_list if call.args)
+        self.assertIn("could not load adapter", warned)
+        self.assertEqual(answer, "diagnosis text")
+
 
 if __name__ == "__main__":
     unittest.main()
