@@ -1,8 +1,9 @@
 """Short plain-English notes on common HCI status codes, written for this project.
 
-Used only to write the training answers. Kept to codes whose usual meaning is
-well established; codes not listed here get an answer that sticks to the code's
-name instead of guessing.
+``--ai`` adds the notes for the codes a capture contains to the model's input,
+so a small model can explain a code by reading rather than recalling. Kept to
+codes whose usual meaning is well established; codes not listed here are
+explained by name only instead of guessing.
 """
 from __future__ import annotations
 

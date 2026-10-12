@@ -1,13 +1,13 @@
 """Deterministic answers for the synthetic training set.
 
 Every answer only restates facts that appear in the capture summary the model
-is given, plus the short code notes in code_notes.py. Failure answers follow
+is given, including its "Status Code Notes" section. Failure answers follow
 the "(1) what failed, (2) when, (3) likely root cause" shape from the system
 prompt; normal sessions say so plainly instead of inventing a problem.
 """
 from __future__ import annotations
 
-from .code_notes import CODE_NOTES
+from btsnoop_parser.code_notes import CODE_NOTES
 
 
 def _cause(code: int, name: str) -> str:

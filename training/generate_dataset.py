@@ -12,9 +12,13 @@ normal sessions, with routine Android noise (vendor-command probes, Delete
 Stored Link Key, Sniff Subrating rejections) mixed into both, so the model
 learns to tell real problems from harmless ones.
 
-The holdout set uses devices and status codes that never appear in training,
-so evaluation measures whether the model reads the summary rather than
-recalling memorized examples.
+Sessions vary from a single short link to a dual-mode device (LE and Classic
+links to the same address) cycling several LE Audio streams, which is what
+captures from real earbuds look like.
+
+The holdout set uses devices, commands and status codes that never appear in
+training, so evaluation measures whether the model reads the summary rather
+than recalling memorized examples.
 
 Usage:
     python3 training/generate_dataset.py
@@ -39,11 +43,15 @@ from training.templates import answer_templates as tmpl
 UTC = datetime.timezone.utc
 
 # Never used in training scenarios; only in the holdout set.
-HOLDOUT_CODES = {0x09, 0x0D, 0x1A, 0x22, 0x3B}
+HOLDOUT_CODES = {0x09, 0x0D, 0x0F, 0x1A, 0x22, 0x2A, 0x3B}
+
+# Longer sessions are regenerated so every example fits train_lora.py's --max-len.
+MAX_INPUT_CHARS = 3000
 
 CONNECT_FAIL_CODES = [0x02, 0x04, 0x05, 0x06, 0x08, 0x09, 0x0D, 0x0E, 0x10, 0x11, 0x1A, 0x1F, 0x22, 0x28, 0x2F, 0x3A, 0x3B, 0x3E]
 DISCONNECT_CODES = [0x03, 0x05, 0x06, 0x08, 0x09, 0x0D, 0x0E, 0x1A, 0x1F, 0x22, 0x28, 0x3B, 0x3D]
-COMMAND_FAIL_CODES = [0x01, 0x0C, 0x0D, 0x11, 0x12, 0x1A, 0x1F, 0x3A]
+# Any status can come back from a command, and the wide spread of names teaches the model to copy them.
+COMMAND_FAIL_CODES = [c for c in HCI_ERROR_CODES if c not in (0x00, 0x13, 0x14, 0x15, 0x16)]
 CIS_FAIL_CODES = [0x0D, 0x1F, 0x22, 0x3A, 0x3B, 0x3E]
 NORMAL_REASONS = {0x13: "the other device", 0x15: "the other device (it powered off)", 0x16: "this phone"}
 
@@ -76,6 +84,15 @@ class Session:
             days=rng.randrange(300), seconds=rng.randrange(86400)
         )
         self.records: list[dict] = []
+        self._handles: set[int] = set()
+
+    def handle(self, kind: str) -> int:
+        """Pick an unused connection handle in the range controllers typically use for that link type."""
+        base = {"classic": 0x001, "le": 0x040, "cis": 0x060}[kind]
+        free = [h for h in range(base, base + 0x10) if h not in self._handles]
+        handle = self.rng.choice(free)
+        self._handles.add(handle)
+        return handle
 
     def _add(self, ptype: int, payload: bytes, gap: float) -> datetime.datetime:
         self.t += datetime.timedelta(seconds=gap)
@@ -147,40 +164,64 @@ class Session:
         return [label for _, label in picked]
 
 
-def _normal_part(s: Session, mac: str, handle: int) -> tuple[str, str]:
-    """Connect, exchange traffic and disconnect normally. Returns (story, end time)."""
+def _audio_streams(s: Session, count: int, keep_last_open: bool) -> int | None:
+    """Start and stop LE Audio streams; optionally leave the last one running and return its handle."""
+    handle = s.handle("cis") if count else None
+    for i in range(count):
+        s.cis(handle, 0x00)
+        s.traffic(s.rng.randrange(1, 4))
+        if i == count - 1 and keep_last_open:
+            return handle
+        s.disconnect(handle, 0x16, gap=s.rng.uniform(2.0, 40.0))
+    return None
+
+
+def _normal_part(s: Session, mac: str) -> str:
+    """Connect, exchange traffic and disconnect normally. Returns the story of what happened."""
     rng = s.rng
-    kind = rng.choice(["le", "le_enh", "classic"])
-    if kind == "classic":
-        t0 = s.classic_connect(mac, handle, 0x00)
-        link = "Classic (BR/EDR)"
-    else:
-        t0 = s.le_connect(mac, handle, 0x00, enhanced=kind == "le_enh")
-        link = "LE"
-    s.traffic(rng.randrange(2, 12))
-    streams = 0
-    if kind != "classic" and rng.random() < 0.4:
-        streams = rng.randrange(1, 4)
-        for i in range(streams):
-            cis_handle = 0x060 + i
-            s.cis(cis_handle, 0x00)
-            s.traffic(rng.randrange(1, 4))
-            s.disconnect(cis_handle, 0x16)
+    kind = rng.choice(["le", "le_enh", "classic", "dual", "dual"])
     reason = rng.choice(list(NORMAL_REASONS))
-    t_end = s.disconnect(handle, reason)
+    recon = ""
+    if kind == "classic":
+        handles = [s.handle("classic")]
+        link = f"over Classic (BR/EDR) at {_hhmmss(s.classic_connect(mac, handles[0], 0x00))}"
+    elif kind == "dual":
+        handles = [s.handle("le"), s.handle("classic")]
+        t_le = s.le_connect(mac, handles[0], 0x00, enhanced=True)
+        t_classic = s.classic_connect(mac, handles[1], 0x00)
+        link = f"over LE at {_hhmmss(t_le)} and over Classic (BR/EDR) at {_hhmmss(t_classic)}"
+        if rng.random() < 0.4:
+            s.disconnect(handles[1], 0x16, gap=rng.uniform(1.0, 4.0))
+            t_again = s.classic_connect(mac, handles[1], 0x00)
+            recon = f" (this phone closed the Classic link once and reconnected it at {_hhmmss(t_again)})"
+    else:
+        handles = [s.handle("le")]
+        link = f"over LE at {_hhmmss(s.le_connect(mac, handles[0], 0x00, enhanced=kind == 'le_enh'))}"
+    s.traffic(rng.randrange(2, 12))
+
+    streams = 0
+    if kind != "classic" and rng.random() < 0.6:
+        streams = rng.randrange(1, 7)
+        open_stream = _audio_streams(s, streams, keep_last_open=rng.random() < 0.5)
+        if open_stream is not None:
+            s.disconnect(open_stream, reason)
+
+    t_end = s.disconnect(handles[0], reason, gap=None if streams == 0 else 0.05)
+    for handle in handles[1:]:
+        s.disconnect(handle, reason, gap=0.07)
     audio = f", with {streams} LE Audio stream(s) started and stopped normally" if streams else ""
-    story = (f"{mac} connected over {link} at {_hhmmss(t0)}{audio}; the connection ended at {_hhmmss(t_end)} "
-             f"when {NORMAL_REASONS[reason]} closed it, which is a normal disconnect.")
-    return story, mac
+    ended = "both links ended" if len(handles) > 1 else "the connection ended"
+    closed = "closed them" if len(handles) > 1 else "closed it"
+    return (f"{mac} connected {link}{recon}{audio}; {ended} at {_hhmmss(t_end)} "
+            f"when {NORMAL_REASONS[reason]} {closed}, which is a normal disconnect.")
 
 
 def scenario_normal(s: Session, devices: list[str], codes: list[int]):
     s.startup()
     routine = s.routine_noise()
     stories = []
-    for i, mac in enumerate(s.rng.sample(devices, s.rng.randrange(1, 3))):
-        story, _ = _normal_part(s, mac, 0x001 + i)
-        stories.append(story)
+    for mac in s.rng.sample(devices, s.rng.randrange(1, 3)):
+        stories.append(_normal_part(s, mac))
     answer = tmpl.normal_session(story=" ".join(stories), routine=routine)
     return answer, ["NORMAL"], None
 
@@ -189,7 +230,7 @@ def _earlier_ok(s: Session, devices: list[str], exclude: str):
     if s.rng.random() < 0.5:
         return None
     mac = s.rng.choice([d for d in devices if d != exclude])
-    _normal_part(s, mac, 0x001)
+    _normal_part(s, mac)
     return mac
 
 
@@ -198,7 +239,7 @@ def scenario_le_fail(s: Session, devices: list[str], codes: list[int]):
     routine = s.routine_noise()
     mac, code = s.rng.choice(devices), s.rng.choice(codes)
     earlier = _earlier_ok(s, devices, mac)
-    handle = 0x002
+    handle = s.handle("le")
     t = s.le_connect(mac, handle, code, enhanced=s.rng.random() < 0.6)
     name = HCI_ERROR_CODES[code]
     answer = tmpl.le_connect_failed(device=mac, handle=f"0x{handle:03X}", time=_hhmmss(t), code=code,
@@ -211,7 +252,7 @@ def scenario_classic_fail(s: Session, devices: list[str], codes: list[int]):
     routine = s.routine_noise()
     mac, code = s.rng.choice(devices), s.rng.choice(codes)
     earlier = _earlier_ok(s, devices, mac)
-    handle = 0x00B
+    handle = s.handle("classic")
     t = s.classic_connect(mac, handle, code)
     name = HCI_ERROR_CODES[code]
     answer = tmpl.classic_connect_failed(device=mac, handle=f"0x{handle:03X}", time=_hhmmss(t), code=code,
@@ -223,10 +264,12 @@ def scenario_abnormal_disconnect(s: Session, devices: list[str], codes: list[int
     s.startup()
     routine = s.routine_noise()
     mac, code = s.rng.choice(devices), s.rng.choice(codes)
-    handle = 0x040
+    _earlier_ok(s, devices, mac)
     if s.rng.random() < 0.5:
+        handle = s.handle("classic")
         t0, kind = s.classic_connect(mac, handle, 0x00), "Classic (BR/EDR)"
     else:
+        handle = s.handle("le")
         t0, kind = s.le_connect(mac, handle, 0x00, enhanced=s.rng.random() < 0.6), "LE"
     s.traffic(s.rng.randrange(3, 15))
     t = s.disconnect(handle, code)
@@ -239,6 +282,8 @@ def scenario_abnormal_disconnect(s: Session, devices: list[str], codes: list[int
 def scenario_command_fail(s: Session, devices: list[str], codes: list[int], opcodes: list[int]):
     s.startup()
     routine = s.routine_noise()
+    if s.rng.random() < 0.5:
+        _normal_part(s, s.rng.choice(devices))
     via_status = s.rng.random() < 0.4
     code = s.rng.choice(codes)
     if via_status:
@@ -257,8 +302,8 @@ def scenario_hardware_error(s: Session, devices: list[str], codes: list[int]):
     s.startup()
     routine = s.routine_noise()
     if s.rng.random() < 0.5:
-        _normal_part(s, s.rng.choice(devices), 0x001)
-    hw = f"0x{s.rng.randrange(0x40):02X}"
+        _normal_part(s, s.rng.choice(devices))
+    hw = f"0x{s.rng.randrange(0x100):02X}"
     t = s.hw_error(int(hw, 16))
     answer = tmpl.hardware_error(time=_hhmmss(t), hw_code=hw, routine=routine)
     return answer, [hw], None
@@ -268,13 +313,16 @@ def scenario_audio_fail(s: Session, devices: list[str], codes: list[int]):
     s.startup()
     routine = s.routine_noise()
     mac, code = s.rng.choice(devices), s.rng.choice(codes)
-    s.le_connect(mac, 0x040, 0x00, enhanced=True)
+    _earlier_ok(s, devices, mac)
+    s.le_connect(mac, s.handle("le"), 0x00, enhanced=True)
     s.traffic(s.rng.randrange(2, 6))
-    t = s.cis(0x060, code)
+    _audio_streams(s, s.rng.randrange(0, 3), keep_last_open=False)
+    handle = s.handle("cis")
+    t = s.cis(handle, code)
     name = HCI_ERROR_CODES[code]
-    answer = tmpl.audio_stream_failed(device=mac, handle="0x060", time=_hhmmss(t), code=code,
+    answer = tmpl.audio_stream_failed(device=mac, handle=f"0x{handle:03X}", time=_hhmmss(t), code=code,
                                       name=name, routine=routine)
-    return answer, [name], code
+    return answer, [mac, name], code
 
 
 # (scenario, status codes it draws from, train count, holdout count)
@@ -283,8 +331,8 @@ PLAN = [
     (scenario_le_fail, CONNECT_FAIL_CODES, 200, 20),
     (scenario_classic_fail, CONNECT_FAIL_CODES, 150, 15),
     (scenario_abnormal_disconnect, DISCONNECT_CODES, 200, 20),
-    (scenario_command_fail, COMMAND_FAIL_CODES, 160, 15),
-    (scenario_hardware_error, [], 50, 8),
+    (scenario_command_fail, COMMAND_FAIL_CODES, 220, 20),
+    (scenario_hardware_error, [], 90, 12),
     (scenario_audio_fail, CIS_FAIL_CODES, 70, 10),
 ]
 
@@ -319,12 +367,17 @@ def main() -> None:
         kind = fn.__name__.removeprefix("scenario_")
         train_codes = [c for c in codes if c not in HOLDOUT_CODES] or codes
         held_codes = [c for c in codes if c in HOLDOUT_CODES] or codes
-        for _ in range(n_train):
-            stats, answer, facts = _run(fn, rng, train_devices, train_codes, train_opcodes)
-            train.append(_example(stats, answer, facts, kind))
-        for _ in range(n_holdout):
-            stats, answer, facts = _run(fn, rng, holdout_devices, held_codes, holdout_opcodes)
-            holdout.append(_example(stats, answer, facts, kind))
+        for split, count, split_devices, split_codes, split_opcodes in (
+            (train, n_train, train_devices, train_codes, train_opcodes),
+            (holdout, n_holdout, holdout_devices, held_codes, holdout_opcodes),
+        ):
+            made = 0
+            while made < count:
+                stats, answer, facts = _run(fn, rng, split_devices, split_codes, split_opcodes)
+                example = _example(stats, answer, facts, kind)
+                if len(example["input"]) <= MAX_INPUT_CHARS:
+                    split.append(example)
+                    made += 1
 
     rng.shuffle(train)
     n_val = len(train) // 20

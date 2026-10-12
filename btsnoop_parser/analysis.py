@@ -125,7 +125,8 @@ class CaptureStats:
                          "timestamp": ts,
                          "level": "WARN",
                          "title": "Abnormal Disconnect",
-                         "detail": f"Handle 0x{handle:03X} disconnected: {reason_str}"
+                         "detail": f"Handle 0x{handle:03X} disconnected: {reason_str}",
+                         "code": reason,
                      })
 
             # LE Meta Event (0x3E) -> LE Connection Complete
@@ -161,6 +162,7 @@ class CaptureStats:
                             "level": "WARN",
                             "title": "LE Connection Failed",
                             "detail": f"Failed to connect to {bd_addr}: {err_str}",
+                            "code": status,
                         })
 
                 # LE Enhanced Connection Complete (0x0A) - used in Bluetooth 5.x
@@ -193,6 +195,7 @@ class CaptureStats:
                             "level": "WARN",
                             "title": "LE Connection Failed",
                             "detail": f"Failed to connect to {bd_addr}: {err_str}",
+                            "code": status,
                         })
 
                 # LE CIS Established (0x19) - LE Audio isochronous stream
@@ -223,6 +226,7 @@ class CaptureStats:
                             "level": "WARN",
                             "title": "LE Audio Stream Failed",
                             "detail": f"Audio stream on handle 0x{handle:03X} failed: {err_str}",
+                            "code": status,
                         })
             
             # Connection Complete (0x03)
@@ -254,6 +258,7 @@ class CaptureStats:
                         "level": "WARN",
                         "title": "Connection Failed",
                         "detail": f"Failed to connect to {bd_addr}: {err_str}",
+                        "code": status,
                     })
 
             # Synchronous Connection Complete (0x2C)
@@ -286,6 +291,7 @@ class CaptureStats:
                         "level": level,
                         "title": "Command Failure",
                         "detail": f"{opcode_name} failed: {err_str}",
+                        "code": status,
                     })
 
             # Command Status (0x0F)
@@ -300,11 +306,13 @@ class CaptureStats:
                         "level": level,
                         "title": "Command Status Error",
                         "detail": f"{opcode_name} returned status {err_str}",
+                        "code": status,
                     })
 
             # Hardware Error (0x10)
-            elif event_code == 0x10 and len(payload) >= 2:
-                code = payload[1]
+            # Payload: [Event(0), Len(1), HardwareCode(2)]
+            elif event_code == 0x10 and len(payload) >= 3:
+                code = payload[2]
                 self.issues.append({
                      "timestamp": ts,
                      "level": "CRITICAL",

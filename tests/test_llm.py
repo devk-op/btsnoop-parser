@@ -85,6 +85,18 @@ class TestBuildContext(unittest.TestCase):
         self.assertNotIn("0xFC17", detected)
         self.assertIn("0xFC17", routine)
 
+    def test_status_code_notes_explain_codes_in_detected_issues(self):
+        issue = dict(_issue(detail="Handle 0x040 disconnected: Connection Timeout"), code=0x08)
+        ctx = build_context(_stats(issues=[issue]))
+        self.assertIn("Status Code Notes:", ctx)
+        self.assertIn("Connection Timeout: the link supervision timeout expired", ctx)
+
+    def test_no_status_code_notes_for_routine_or_unknown_codes(self):
+        routine = dict(_issue(level="INFO"), code=0x12)
+        unknown = dict(_issue(), code=0xEE)
+        ctx = build_context(_stats(issues=[routine, unknown, _issue()]))
+        self.assertNotIn("Status Code Notes:", ctx)
+
     def test_default_question_does_not_presume_failure(self):
         from btsnoop_parser.llm import DEFAULT_QUESTION
         self.assertNotIn("Why did", DEFAULT_QUESTION)

@@ -265,5 +265,23 @@ class TestPrintSummary(unittest.TestCase):
         self.assertIn("Potential Issues (1):", out)
 
 
+class TestHardwareError(unittest.TestCase):
+    def test_reports_the_hardware_code_not_the_length_byte(self):
+        s = CaptureStats()
+        # [Event(0x10), Len, HardwareCode]
+        s.analyze_record(_record(bytes([0x10, 0x01, 0x2A])))
+        self.assertEqual(s.issues[0]["level"], "CRITICAL")
+        self.assertIn("0x2A", s.issues[0]["detail"])
+
+
+class TestIssueCodes(unittest.TestCase):
+    def test_status_based_issues_carry_their_code(self):
+        s = CaptureStats()
+        s.analyze_record(_record(_disconnect_payload(0x001, 0x08)))
+        s.analyze_record(_record(_cmd_complete_payload(0x0C03, 0x0C)))
+        self.assertEqual([i["code"] for i in s.issues], [0x08, 0x0C])
+
+
+
 if __name__ == "__main__":
     unittest.main()

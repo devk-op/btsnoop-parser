@@ -41,7 +41,7 @@ def main() -> None:
     parser.add_argument("--output", help="Adapter output folder (default: training/checkpoints/<model>-lora)")
     parser.add_argument("--epochs", type=float, default=2)
     parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--max-len", type=int, default=1536)
+    parser.add_argument("--max-len", type=int, default=1920)
     parser.add_argument("--bf16", action="store_true", help="Train in bfloat16 (faster; fall back to fp32 if loss is NaN)")
     args = parser.parse_args()
 

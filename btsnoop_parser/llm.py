@@ -15,6 +15,8 @@ import sys
 from typing import TYPE_CHECKING, Optional
 
 from .analysis import format_duration
+from .code_notes import CODE_NOTES
+from .constants import HCI_ERROR_CODES
 
 if TYPE_CHECKING:
     from .analysis import CaptureStats
@@ -41,7 +43,8 @@ Android (e.g. probing vendor commands) and are not a root cause on their own. Di
 no detected issues, say the session looks normal and describe how it ended — do not invent a failure.
 
 When you see an HCI error/status code, explain what it means in plain English using the text already given \
-in the summary. If something did fail, structure your answer around: (1) what failed, (2) at what point in \
+in the summary. If the summary has a "Status Code Notes" entry for the code, base the explanation on it; if it \
+has none, name the code without guessing a cause. If something did fail, structure your answer around: (1) what failed, (2) at what point in \
 the sequence, (3) the likely root cause. Keep your answer concise — a few sentences per point, not an essay."""
 
 
@@ -130,6 +133,12 @@ def build_context(
         lines.extend(_format_issues(problems, max_issues))
     else:
         lines.append("  No issues detected.")
+
+    noted = sorted({i["code"] for i in problems if i.get("code") in CODE_NOTES})
+    if noted:
+        lines.append("")
+        lines.append("Status Code Notes:")
+        lines.extend(f"  {HCI_ERROR_CODES[code]}: {CODE_NOTES[code]}." for code in noted)
 
     if routine:
         lines.append("")
