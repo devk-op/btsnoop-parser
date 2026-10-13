@@ -23,7 +23,9 @@ from .constants import HCI_ERROR_CODES
 if TYPE_CHECKING:
     from .analysis import CaptureStats
 
-DEFAULT_BASE_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
+DEFAULT_BASE_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+# LoRA adapter trained for this summary format (see training/); only valid on DEFAULT_BASE_MODEL.
+DEFAULT_ADAPTER = "kdonut/btsnoop-hci-qwen2.5-0.5b-lora"
 DEFAULT_QUESTION = (
     "What happened in this Bluetooth session? Did anything actually fail, "
     "and if so, what is the most likely root cause?"

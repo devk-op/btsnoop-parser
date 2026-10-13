@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Phase 1: baseline inference with the bare base model, no LoRA yet.
+"""Run the base model, without an adapter, on one hand-built failure summary.
 
-Run this first to confirm your environment (torch/transformers, MPS backend)
-works, and to see what the un-tuned model's answers look like before you
-train anything. This is the same code path `btsnoop_parser --ai` uses when
-no --adapter-path is given.
+Confirms the environment works (torch/transformers, MPS backend) and shows
+what the untrained model answers. This is the code path `btsnoop_parser --ai`
+uses when an adapter is not applied.
 
 Usage:
     python3 training/baseline_check.py

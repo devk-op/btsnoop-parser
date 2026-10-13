@@ -89,14 +89,17 @@ def main() -> None:
         default=None,
         help=(
             "Hugging Face model id or local model folder to use for --ai "
-            "(default: $BTSNOOP_AI_MODEL if set, else Qwen/Qwen2.5-1.5B-Instruct)"
+            "(default: $BTSNOOP_AI_MODEL if set, else Qwen/Qwen2.5-0.5B-Instruct with the btsnoop-hci adapter)"
         ),
     )
     parser.add_argument(
         "--adapter-path",
         metavar="DIR",
         default=None,
-        help="LoRA adapter to specialize the --ai model: a local folder or a Hugging Face repo id",
+        help=(
+            "LoRA adapter to specialize the --ai model: a local folder or a Hugging Face repo id "
+            "(default: the btsnoop-hci adapter when the default model is used)"
+        ),
     )
     parser.add_argument(
         "--link-keys",
@@ -152,19 +155,23 @@ def main() -> None:
     if args.ai:
         stats = _build_capture_stats(records)
         from .llm import (
+            DEFAULT_ADAPTER,
             DEFAULT_BASE_MODEL,
             DEFAULT_QUESTION,
             ModelUnavailableError,
             ask,
         )
         base_model = args.base_model or os.environ.get("BTSNOOP_AI_MODEL") or DEFAULT_BASE_MODEL
+        adapter_path = args.adapter_path
+        if adapter_path is None and base_model == DEFAULT_BASE_MODEL:
+            adapter_path = DEFAULT_ADAPTER
         print(f"Loading {base_model} (this may take a moment)...", file=sys.stderr)
         try:
             answer = ask(
                 stats,
                 question=args.question or DEFAULT_QUESTION,
                 base_model=base_model,
-                adapter_path=args.adapter_path,
+                adapter_path=adapter_path,
             )
         except ModelUnavailableError as exc:
             print(f"Error: {exc}", file=sys.stderr)

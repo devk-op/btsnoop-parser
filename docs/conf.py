@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.abspath(".."))
 
 project = "btsnoop-parser"
 author = "Kranthi"
-release = "0.4.0"
+release = "0.6.0"
 
 extensions = [
     "sphinx.ext.autodoc",

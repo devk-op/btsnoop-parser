@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase 2: synthesize training data for HCI capture analysis.
+"""Synthesize training data for HCI capture analysis.
 
 Each scenario is built as raw HCI packets and run through the real
 btsnoop_parser.analysis.CaptureStats and btsnoop_parser.llm.build_context, so

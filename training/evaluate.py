@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase 4: score a model (with or without a LoRA adapter) on the holdout set.
+"""Score a model (with or without a LoRA adapter) on the holdout set.
 
 The holdout set uses devices and status codes that never appear in training.
 A failure answer counts as correct when it contains every key fact for that

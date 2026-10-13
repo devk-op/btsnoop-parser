@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase 3: LoRA fine-tune a small model on the synthetic HCI dataset.
+"""LoRA fine-tune a small model on the synthetic HCI dataset.
 
 LoRA freezes the base model and trains small low-rank matrices added to the
 attention and MLP projections, so only a few million parameters change.

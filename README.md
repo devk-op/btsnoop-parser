@@ -38,19 +38,16 @@ Potential Issues (1):
 ```
 $ btsnoop_parser capture.log --ai
 
-Loading Qwen/Qwen2.5-1.5B-Instruct (this may take a moment)...
-The Bluetooth session lasted for approximately 3 minutes and 41 seconds. It involved two connections:
-1. **Initial Connection**: On June 1, 2024, at 9:12 AM, a connection was established between device AA:BB:CC:DD:EE:FF (unknown) and another unknown device.
-2. **Disconnection**: At 9:14 PM, the connection was abruptly terminated by the remote device due to a remote user terminating the connection.
-**Detected Issue**: There was a disconnect initiated by the remote device, which resulted from a page timeout during the connection attempt.
-**Root Cause**: The most likely root cause was that the connection attempt timed out before completing successfully. This could have been due to various factors including network latency, insufficient buffer space on either end, or other communication issues preventing the connection from being fully established within the expected time frame.
+Loading Qwen/Qwen2.5-0.5B-Instruct (this may take a moment)...
+Yes, something failed.
+(1) What failed: the LE connection attempt to 11:22:33:44:55:66 (handle 0x002).
+(2) When: at 09:15:44, after an earlier connection to AA:BB:CC:DD:EE:FF had ended normally.
+(3) Likely root cause: Page Timeout — the other device never answered the connection request — it was most likely out of range, switched off, or not accepting connections.
 ```
 
-That's unedited output from the default 1.5B model for the capture above. It finds the
-real problem (the Page Timeout), but small local models also muddle details: the clean
-disconnect is blamed on the timeout, "9:14 PM" should be AM, and the speculative causes
-at the end are generic. Treat `--ai` as a plain-English starting point and check it
-against `--stats`.
+That's unedited output for the capture above, from a 0.5B model fine-tuned for this job.
+It runs on a laptop CPU in a few seconds. It is still a small model working from a summary,
+so treat `--ai` as a plain-English starting point and check it against `--stats`.
 
 ## Features
 
@@ -60,7 +57,7 @@ against `--stats`.
 - **`--pcap`** — export to PCAP (link type 201) for Wireshark / tshark.
 - **`--stats`** — connection history, device list, and issue detection.
 - **`--protocols`** — timeline of what the devices said above HCI: L2CAP channels, RFCOMM serial ports, HFP commands in plain English, voice links.
-- **`--ai`** — ask a local LLM to diagnose capture issues in plain English (fully offline, optional extra).
+- **`--ai`** — a small local model, fine-tuned on HCI sessions, says in plain English whether anything failed and why (runs offline, optional extra).
 - **`--link-keys`** — extract Classic BT link keys seen in HCI traffic (for use with your own authorized captures).
 - Decodes common HCI command/event payloads.
 - Corrects the Android ±378-day timestamp bug automatically.
@@ -108,8 +105,9 @@ btsnoop_parser capture.log --protocols
 btsnoop_parser capture.log --ai
 btsnoop_parser capture.log --ai --question "Why did the connection drop at 09:15?"
 
-# Specialize --ai with a LoRA adapter you've fine-tuned yourself (see training/)
-btsnoop_parser capture.log --ai --adapter-path training/checkpoints/hci-rootcause-lora
+# Use your own model or LoRA adapter instead of the default (see training/)
+btsnoop_parser capture.log --ai --base-model Qwen/Qwen2.5-1.5B-Instruct
+btsnoop_parser capture.log --ai --adapter-path training/checkpoints/Qwen2.5-0.5B-Instruct-lora
 
 # Extract Classic BT link keys seen in the capture (your own authorized captures only)
 btsnoop_parser capture.log --link-keys
@@ -161,17 +159,23 @@ Full API reference: **[btsnoop-parser.readthedocs.io](https://btsnoop-parser.rea
 
 ## Local LLM analysis (`--ai`)
 
-`--ai` prompts a local Hugging Face model (default: `Qwen/Qwen2.5-1.5B-Instruct`)
-with a plain-text summary of the capture's connection history and detected
-issues, and asks it to explain what went wrong. It works out of the box with
-just the base model, or you can specialize it further by fine-tuning a LoRA
-adapter on your own — see [`training/README.md`](training/README.md) for a
-full walkthrough (dataset generation, LoRA training with `peft`, evaluation).
+`--ai` gives a local model a plain-text summary of the capture (connection history,
+detected issues, routine failures, and a short note on each status code involved) and
+asks whether anything actually failed, and if so what, when and why. The model never
+sees raw packets, and nothing leaves your machine.
 
-`--base-model` takes a Hugging Face model id or a local model folder; set
-`BTSNOOP_AI_MODEL` to change the default. `--adapter-path` takes a local adapter
-folder or a Hugging Face repo id. Downloaded models are cached, and
-`HF_HUB_OFFLINE=1` skips the network check on later runs.
+The default is [`Qwen/Qwen2.5-0.5B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct)
+with the [`kdonut/btsnoop-hci-qwen2.5-0.5b-lora`](https://huggingface.co/kdonut/btsnoop-hci-qwen2.5-0.5b-lora)
+adapter, trained on synthetic HCI sessions with the scripts in [`training/`](training/README.md).
+On 122 held-out sessions it gets 118 right; the same model without the adapter gets 1,
+and the three-times-larger `Qwen2.5-1.5B-Instruct` gets 27. Those sessions are synthetic,
+so expect lower accuracy on real captures.
+
+- `--base-model` takes a Hugging Face model id or a local model folder; `BTSNOOP_AI_MODEL`
+  changes the default. The default adapter is only applied to the default model.
+- `--adapter-path` takes a local adapter folder or a Hugging Face repo id.
+- Models are downloaded once (about 1 GB) and cached. `HF_HUB_OFFLINE=1` skips the
+  network check on later runs.
 
 ## Link key extraction (`--link-keys`)
 

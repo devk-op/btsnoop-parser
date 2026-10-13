@@ -108,7 +108,7 @@ def test_cli_ai_flag_wires_question_and_model(mock_parse, mock_ask, mock_stdout)
 @patch("btsnoop_parser.cli.parse_btsnoop_file")
 def test_cli_ai_flag_default_model(mock_parse, mock_ask, mock_stdout):
     """--ai without --question/--base-model should fall back to llm's defaults."""
-    from btsnoop_parser.llm import DEFAULT_BASE_MODEL, DEFAULT_QUESTION
+    from btsnoop_parser.llm import DEFAULT_ADAPTER, DEFAULT_BASE_MODEL, DEFAULT_QUESTION
 
     mock_parse.return_value = []
     mock_ask.return_value = "diagnosis text"
@@ -119,7 +119,7 @@ def test_cli_ai_flag_default_model(mock_parse, mock_ask, mock_stdout):
     _, kwargs = mock_ask.call_args
     assert kwargs["question"] == DEFAULT_QUESTION
     assert kwargs["base_model"] == DEFAULT_BASE_MODEL
-    assert kwargs["adapter_path"] is None
+    assert kwargs["adapter_path"] == DEFAULT_ADAPTER
 
 @patch("btsnoop_parser.llm.ask")
 @patch("btsnoop_parser.cli.parse_btsnoop_file")
@@ -204,6 +204,7 @@ def test_cli_ai_model_from_environment(mock_parse, mock_ask, mock_stdout):
         with patch.object(sys, "argv", ["btsnoop_parser", "test.log", "--ai"]):
             main()
         assert mock_ask.call_args.kwargs["base_model"] == "/models/local-qwen"
+        assert mock_ask.call_args.kwargs["adapter_path"] is None  # the default adapter only fits the default model
         with patch.object(sys, "argv", ["btsnoop_parser", "test.log", "--ai", "--base-model", "other/model"]):
             main()
         assert mock_ask.call_args.kwargs["base_model"] == "other/model"

@@ -61,10 +61,13 @@ Options
 
 .. option:: --ai
 
-   Ask a local LLM to diagnose capture issues in plain English. Requires the
-   ``ai`` extra (``pip install "btsnoop-parser[ai]"``) — pulls in ``torch``
-   and ``transformers``. Runs entirely locally; only a summarized version of
-   the capture is sent to the model, never raw packets.
+   Ask a local model whether anything failed, and why, in plain English.
+   Requires the ``ai`` extra (``pip install "btsnoop-parser[ai]"``) — pulls in
+   ``torch`` and ``transformers``. Runs entirely locally; the model reads a
+   summary of the capture, never raw packets. The default model is
+   ``Qwen/Qwen2.5-0.5B-Instruct`` with the
+   ``kdonut/btsnoop-hci-qwen2.5-0.5b-lora`` adapter, fine-tuned for this
+   summary format.
 
 .. option:: --question TEXT
 
@@ -76,12 +79,14 @@ Options
 
    Hugging Face model id, or the path of a local model folder, to use for
    ``--ai``. Defaults to the ``BTSNOOP_AI_MODEL`` environment variable if it
-   is set, otherwise ``Qwen/Qwen2.5-1.5B-Instruct``.
+   is set, otherwise ``Qwen/Qwen2.5-0.5B-Instruct``.
 
 .. option:: --adapter-path DIR
 
    LoRA adapter to specialize the ``--ai`` model: a local folder or a Hugging
-   Face repo id — see ``training/README.md`` for how to train one.
+   Face repo id. Defaults to the btsnoop-hci adapter when the default model is
+   used, and to no adapter otherwise. See ``training/README.md`` for how to
+   train one.
 
 .. option:: --link-keys
 
