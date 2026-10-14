@@ -55,6 +55,18 @@ _FINAL_RESULTS = {
     "BLACKLISTED": "Number is blocked",
 }
 
+_DEVICE_INFO = {
+    "CGMI": "Asks for the phone's manufacturer",
+    "CGMM": "Asks for the phone's model",
+    "CGMR": "Asks for the phone's software version",
+    "CIMI": "Asks for the subscriber identity",
+}
+
+_CME_ERRORS = {
+    "0": "phone failure", "3": "not allowed", "4": "not supported", "10": "no SIM card",
+    "30": "no network service", "32": "network not allowed (emergency calls only)",
+}
+
 _COMMAND = re.compile(r"^AT([+^][A-Z0-9]+|[A-Z])(.*)$", re.IGNORECASE)
 _RESULT = re.compile(r"^([+^][A-Z0-9 ]+?):\s*(.*)$", re.IGNORECASE)
 
@@ -101,7 +113,8 @@ class HfpSession:
         if result:
             name = result.group(1).upper().lstrip("+")
             return self._describe_result(name, result.group(2)), name == "CME ERROR"
-        return "Unrecognized line", False
+        # A bare text line answers a query such as AT+CGMI (manufacturer) or AT+CGMM (model).
+        return "Information reply", False
 
     def _indicator(self, index: str, value: str) -> str:
         position = int(index) - 1 if index.isdigit() else -1
@@ -184,6 +197,14 @@ class HfpSession:
             return "Apple accessory identifies itself"
         if name == "IPHONEACCEV":
             return _apple_accessory_event(arg)
+        if name in _DEVICE_INFO:
+            return _DEVICE_INFO[name]
+        if name in ("CMGF", "CPMS", "CNMI", "CMGL", "CMGR"):
+            return "Text message (SMS) command"
+        if name == "CPBS":
+            return "Asks which phonebook storage is available" if test else "Selects or checks the phonebook storage"
+        if name == "CSCS":
+            return "Asks or sets the character set"
         if name in ("XEVENT", "ANDROID", "CSRSF", "CSRBATT", "CSR"):
             return "Vendor-specific command"
         return "Command"
@@ -234,7 +255,12 @@ class HfpSession:
         if name == "BIND":
             return f"Hands-free indicators: {value}"
         if name == "CME ERROR":
-            return f"Command failed (error {value})"
+            reason = _CME_ERRORS.get(value.strip())
+            return f"Command failed: {reason}" if reason else f"Command failed (error {value})"
+        if name == "CPBS":
+            return f"Phonebook storage: {value}"
+        if name == "CSCS":
+            return f"Character sets: {value}"
         if name in ("XAPL", "XEVENT", "ANDROID"):
             return "Vendor-specific response"
         return "Result"

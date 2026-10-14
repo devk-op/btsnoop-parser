@@ -47,6 +47,7 @@ class ProtocolEvent:
 class _Stream:
     """A2DP audio sent on one connection since the stream last started."""
 
+    started: Optional[L2capFrame] = None  # the Start accept, when it was captured
     packets: int = 0
     size: int = 0
     first: Optional[L2capFrame] = None
@@ -58,6 +59,10 @@ class _Stream:
 _STALL_SECONDS = 2.0
 # How long an unconfirmed AVDTP command waits for its answer.
 _ANSWER_WINDOW = datetime.timedelta(seconds=3)
+
+
+def _timestamp(source: Any) -> datetime.datetime:
+    return source.timestamp if isinstance(source, L2capFrame) else source["timestamp"]
 
 
 def _addr(data: bytes) -> str:
@@ -253,7 +258,7 @@ class ProtocolTrace:
                 self._codecs[handle] = codecs[0]
         elif accepted and sig.signal == 0x07:
             self._started.add(handle)
-            self._streams[handle] = _Stream()
+            self._streams[handle] = _Stream(started=frame)
         elif accepted and sig.signal in (0x08, 0x09, 0x0A):
             self._stop_stream(frame, handle, "")
             self._started.discard(handle)
@@ -288,7 +293,14 @@ class ProtocolTrace:
 
     def _stop_stream(self, source: Any, handle: int, note: str) -> None:
         stream = self._streams.pop(handle, None)
-        if stream is None or stream.first is None:
+        if stream is None:
+            return
+        if stream.first is None:
+            if stream.started is not None:
+                seconds = (_timestamp(source) - stream.started.timestamp).total_seconds()
+                self._add(source, handle, "A2DP", "Stream summary", direction=stream.started.direction,
+                          detail=f"Streamed for {seconds:.1f} s, but no audio packets are in the log: the phone's "
+                                 "Bluetooth chip encoded and sent the audio itself (hardware offload)")
             return
         seconds = (stream.last.timestamp - stream.first.timestamp).total_seconds()
         rate = f", about {stream.size * 8 / seconds / 1000:.0f} kbit/s" if seconds > 0 else ""

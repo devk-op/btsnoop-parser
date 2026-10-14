@@ -29,7 +29,8 @@ BUTTONS = {
 
 PDUS = {
     0x10: "Get Capabilities", 0x11: "List Player Settings", 0x13: "Get Player Settings",
-    0x14: "Set Player Settings", 0x20: "Get Track Details", 0x30: "Get Play Status",
+    0x12: "List Player Setting Values", 0x14: "Set Player Settings", 0x15: "Get Setting Names",
+    0x16: "Get Setting Value Names", 0x20: "Get Track Details", 0x30: "Get Play Status",
     0x31: "Register Notification", 0x40: "Continue Response", 0x41: "Abort Response",
     0x50: "Set Absolute Volume", 0x60: "Set Addressed Player", 0x74: "Play Item", 0x90: "Add To Now Playing",
 }
@@ -143,9 +144,10 @@ def describe(msg: AvrcpMessage, from_phone: bool) -> tuple[str, str, bool]:
         if not msg.is_response:
             return name, f"Asks to be told when the {what} changes", False
         value = _event_value(event, params[1:]) if event is not None else ""
+        bad = event == 0x01 and value == "error"
         if msg.ctype == 0xF:
-            return name, f"Current {what}: {value}" if value else f"Will report {what} changes", False
-        return name, f"{what.capitalize()} changed" + (f": {value}" if value else ""), False
+            return "Notification", f"Current {what}: {value}" if value else f"Will report {what} changes", bad
+        return "Notification", f"{what.capitalize()} changed" + (f": {value}" if value else ""), bad
     if pdu == 0x50:
         level = _volume(params[0]) if params else "?"
         return name, (f"Sets the volume to {level}" if not msg.is_response else f"Volume is now {level}"), False

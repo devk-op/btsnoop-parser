@@ -219,6 +219,12 @@ class TestHfp(unittest.TestCase):
         self.assertTrue(session.describe("+CME ERROR: 30")[1])
         self.assertFalse(session.describe("OK")[1])
 
+    def test_device_information(self):
+        session = HfpSession()
+        self.assertEqual(session.describe("AT+CGMM")[0], "Asks for the phone's model")
+        self.assertEqual(session.describe("Pixel 9")[0], "Information reply")
+        self.assertEqual(session.describe("+CME ERROR: 4"), ("Command failed: not supported", True))
+
     def test_unknown_command(self):
         self.assertEqual(HfpSession().describe("AT+ZZZ=1")[0], "Command")
 
@@ -396,6 +402,15 @@ class TestA2dpTrace(unittest.TestCase):
         tail = [(e.protocol, e.summary) for e in trace.events][-2:]
         self.assertEqual(tail, [("A2DP", "Stream summary"), ("HCI", "Disconnected")])
 
+    def test_offloaded_stream_is_explained(self):
+        capture = self._session()  # Start accepted, then no audio packets reach HCI
+        capture.wait(4.0)
+        capture.avdtp("RX", 0x0051, 5, 0, 0x09, bytes([0x04]))
+        capture.avdtp("TX", _SIG, 5, 2, 0x09)
+        summary = self._a2dp(_trace(capture))[-1]
+        self.assertTrue(summary[1].startswith("Streamed for 4.0 s, but no audio packets are in the log"))
+        self.assertIn("hardware offload", summary[1])
+
     def test_stream_running_at_end_of_capture(self):
         capture = self._session()
         capture.media(_MEDIA, 1)
@@ -477,6 +492,10 @@ class TestAvrcp(unittest.TestCase):
         self.assertEqual(self._describe(_vendor(4, True, 0xF, 0x31, bytes([0x01, 0x01])))[1], "Current play status: playing")
         self.assertEqual(self._describe(_vendor(4, True, 0xD, 0x31, bytes([0x01, 0x02])))[1], "Play status changed: paused")
         self.assertEqual(self._describe(_vendor(5, True, 0xD, 0x31, bytes([0x02]) + bytes(8)))[1], "Track changed: new track")
+
+    def test_player_error_is_flagged(self):
+        self.assertEqual(self._describe(_vendor(4, True, 0xD, 0x31, bytes([0x01, 0xFF]))),
+                         ("Notification", "Play status changed: error", True))
 
     def test_play_status(self):
         params = struct.pack(">II", 225_000, 83_000) + bytes([0x01])
