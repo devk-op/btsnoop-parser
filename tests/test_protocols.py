@@ -5,7 +5,7 @@ import datetime
 import struct
 import unittest
 
-from btsnoop_parser import avdtp, avrcp
+from btsnoop_parser import android_auto, avdtp, avrcp
 from btsnoop_parser.hfp import HfpSession, looks_like_at, split_lines
 from btsnoop_parser.l2cap import L2capDecoder
 from btsnoop_parser.protocols import ProtocolTrace
@@ -542,6 +542,57 @@ class TestAvrcpTrace(unittest.TestCase):
         shown = [(e.summary, e.detail) for e in trace.events if e.protocol == "AVRCP" and not e.routine]
         self.assertEqual(shown, [("Next", "Next pressed")])
         self.assertEqual(trace.frame_counts[("11:22:33:44:55:66", "AVCTP")], 3)
+
+
+
+def _aa(message: int, body: bytes = b"") -> bytes:
+    return struct.pack(">HH", len(body), message) + body
+
+
+class TestAndroidAuto(unittest.TestCase):
+    def _capture(self, advertise: bool = True) -> _Capture:
+        capture = _Capture()
+        capture.connected()
+        capture.open_channel(psm=0x0001, scid=0x0040, dcid=0x0050, ident=1)
+        sdp = b"\x07\x00\x01\x00\x20" + (android_auto.SERVICE_UUID if advertise else bytes(16))
+        capture.l2cap("RX", 0x0050, sdp)
+        capture.open_channel(psm=0x0003, scid=0x0041, dcid=0x0051, ident=2)
+        capture.rfcomm("RX", 0x0051, 10, 0x3F)
+        return capture
+
+    def _session(self, capture: _Capture, status: bytes = b"\x08\x00") -> ProtocolTrace:
+        capture.rfcomm("RX", 0x0051, 10, 0xEF, _aa(4, b"\x08\x01\x10\x01"))
+        capture.rfcomm("TX", 0x0041, 10, 0xEF, _aa(5, b"\x08\x01"))
+        capture.rfcomm("RX", 0x0051, 10, 0xEF, _aa(1, b"\x0a\x04\xc0\xa8\x01\x01"))
+        capture.rfcomm("TX", 0x0041, 10, 0xEF, _aa(2))
+        capture.rfcomm("TX", 0x0041, 10, 0xEF, _aa(7, b"\x18\x00"))
+        capture.rfcomm("RX", 0x0051, 10, 0xEF, _aa(3, b"\x0a\x07MyCarAP\x12\x0bSecretPass1"))
+        capture.rfcomm("TX", 0x0041, 10, 0xEF, _aa(6, status))
+        return _trace(capture)
+
+    def test_setup_is_decoded(self):
+        trace = self._session(self._capture())
+        steps = [(e.summary, e.is_error) for e in trace.events if e.protocol == "AAuto"]
+        self.assertEqual([s for s, _ in steps], ["Version request", "Version reply", "Start request", "Wi-Fi request",
+                                                "Start reply", "Wi-Fi details", "Wi-Fi status"])
+        self.assertFalse(any(error for _, error in steps))
+        self.assertEqual(trace.serial_labels[("11:22:33:44:55:66", 5)], "wireless Android Auto setup")
+
+    def test_wifi_credentials_are_never_shown(self):
+        trace = self._session(self._capture())
+        text = " ".join(f"{e.summary} {e.detail}" for e in trace.events)
+        self.assertNotIn("MyCarAP", text)
+        self.assertNotIn("SecretPass1", text)
+
+    def test_failed_wifi_connection_is_flagged(self):
+        trace = self._session(self._capture(), status=b"\x08\xfd\xff\xff\xff\xff\xff\xff\xff\xff\x01")  # status -3
+        last = [e for e in trace.events if e.protocol == "AAuto"][-1]
+        self.assertTrue(last.is_error)
+        self.assertEqual(last.detail, "Phone could not connect to the car's Wi-Fi (status -3)")
+
+    def test_needs_the_advertised_service(self):
+        trace = self._session(self._capture(advertise=False))
+        self.assertFalse([e for e in trace.events if e.protocol == "AAuto"])
 
 
 if __name__ == "__main__":

@@ -58,7 +58,8 @@ Options
    opening and closing (labelled SDP, RFCOMM, AVDTP, ATT, ...), A2DP streaming
    (codec negotiation, start, pause, close, per-stream totals and stalls),
    AVRCP remote control (buttons, volume, play status, track changes; routine
-   polling is hidden), RFCOMM serial ports, HFP commands with a plain-English meaning, and voice
+   polling is hidden), wireless Android Auto start-up (the car's Wi-Fi
+   password is never shown), RFCOMM serial ports, HFP commands with a plain-English meaning, and voice
    (SCO/eSCO) links. Needs a capture that includes ACL data. Channels opened
    before the capture began are identified from their contents where that is
    reliable, and filtered (truncated) captures are reported as such.

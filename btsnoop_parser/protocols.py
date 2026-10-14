@@ -17,7 +17,7 @@ import datetime
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
-from . import avdtp, avrcp
+from . import android_auto, avdtp, avrcp
 from .constants import HCI_ERROR_CODES
 from .hfp import HfpSession, decode_text, looks_like_at, split_lines
 from .l2cap import L2capDecoder, L2capFrame
@@ -78,6 +78,10 @@ class ProtocolTrace:
         self._l2cap = L2capDecoder()
         # (device, serial port) -> [data frames, bytes, carries HFP]
         self.serial_ports: dict[tuple[str, int], list[Any]] = {}
+        # (device, serial port) -> what the port carries, when it is not HFP
+        self.serial_labels: dict[tuple[str, int], str] = {}
+        self._android_auto_cars: set[int] = set()  # handles that advertised wireless Android Auto
+        self._android_auto_ports: set[tuple[int, int]] = set()  # (handle, dlci)
         self._devices: dict[int, str] = {}
         self._voice_handles: set[int] = set()
         # (handle, dlci) -> HFP state; (handle, dlci, direction) -> unfinished AT text
@@ -157,6 +161,8 @@ class ProtocolTrace:
             self._stop_stream(record, handle, "")
             self._l2cap.forget_handle(handle)
             self._candidates = [c for c in self._candidates if c[0].handle != handle]
+            self._android_auto_cars.discard(handle)
+            self._android_auto_ports = {k for k in self._android_auto_ports if k[0] != handle}
             for store in (self._hfp, self._at_buffers, self._labels):
                 for key in [k for k in store if k[0] == handle]:
                     del store[key]
@@ -169,6 +175,8 @@ class ProtocolTrace:
         self.frame_counts[(self.device(frame.handle), protocol)] += 1
         for text, is_error in frame.notes:
             self._add(frame, frame.handle, "L2CAP", text, is_error=is_error)
+        if protocol == "SDP" and android_auto.SERVICE_UUID in frame.payload:
+            self._android_auto_cars.add(frame.handle)
         if protocol == "L2CAP Signaling":
             self._closed_identified_channels(frame)
         elif protocol == "RFCOMM":
@@ -333,8 +341,22 @@ class ProtocolTrace:
             usage = self.serial_ports.setdefault((self.device(frame.handle), rfcomm.channel), [0, 0, False])
             usage[0] += 1
             usage[1] += len(rfcomm.payload)
-            if self._serial_data(frame, rfcomm.dlci, rfcomm.payload):
+            if self._android_auto(frame, rfcomm.dlci, rfcomm.payload):
+                self.serial_labels[(self.device(frame.handle), rfcomm.channel)] = "wireless Android Auto setup"
+            elif self._serial_data(frame, rfcomm.dlci, rfcomm.payload):
                 usage[2] = True
+
+    def _android_auto(self, frame: L2capFrame, dlci: int, payload: bytes) -> bool:
+        """Decode wireless Android Auto set-up messages on a car that advertised the service."""
+        key = (frame.handle, dlci)
+        if key not in self._android_auto_ports:
+            if frame.handle not in self._android_auto_cars or not android_auto.is_message(payload):
+                return False
+            self._android_auto_ports.add(key)
+        if android_auto.is_message(payload):
+            summary, detail, is_error = android_auto.describe(payload)
+            self._add(frame, frame.handle, "AAuto", summary, detail=detail, is_error=is_error)
+        return True
 
     def _serial_data(self, frame: L2capFrame, dlci: int, payload: bytes) -> bool:
         """Decode AT traffic on a serial port; return False if the data is something else."""
@@ -377,7 +399,7 @@ def print_trace(trace: ProtocolTrace, color: bool = True) -> None:
     if trace.serial_ports:
         print(f"\n{BOLD} Serial Ports (RFCOMM) ───{RESET}")
         for (device, port), (frames, size, is_hfp) in sorted(trace.serial_ports.items()):
-            use = "HFP commands" if is_hfp else "app/vendor data (not decoded)"
+            use = "HFP commands" if is_hfp else trace.serial_labels.get((device, port), "app/vendor data (not decoded)")
             print(f"  {CYAN}{device}{RESET}  port {port:<3} {frames:>6,} data frames  {size / 1024:>8.1f} KB  {use}")
 
     print(f"\n{BOLD} Protocol Timeline ───{RESET}")
