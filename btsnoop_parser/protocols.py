@@ -17,7 +17,7 @@ import datetime
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
-from . import android_auto, avdtp, avrcp
+from . import android_auto, avdtp, avrcp, gatt
 from .constants import HCI_ERROR_CODES
 from .hfp import HfpSession, decode_text, looks_like_at, split_lines
 from .l2cap import L2capDecoder, L2capFrame
@@ -79,6 +79,15 @@ class DeviceProfiles:
     no_service: bool = False
     hfp_errors: int = 0
     voice_links: list[tuple[datetime.datetime, Optional[datetime.datetime], str]] = field(default_factory=list)
+    # GATT: services the device offers, phone services it used, and values seen
+    gatt_services: list[str] = field(default_factory=list)
+    gatt_phone_services: list[str] = field(default_factory=list)
+    device_info: dict[str, str] = field(default_factory=dict)
+    battery: list[int] = field(default_factory=list)
+    heart_rates: list[int] = field(default_factory=list)
+    gatt_states: dict[str, str] = field(default_factory=dict)
+    gatt_updates: collections.Counter[str] = field(default_factory=collections.Counter)
+    gatt_errors: list[str] = field(default_factory=list)
     # LE Audio streams: (start, end or None while open)
     le_audio: list[tuple[datetime.datetime, Optional[datetime.datetime]]] = field(default_factory=list)
     android_auto_start: Optional[datetime.datetime] = None
@@ -86,7 +95,9 @@ class DeviceProfiles:
 
     def active(self) -> bool:
         return any((self.streams, self.buttons, self.volume_sets, self.volume_reports, self.tracks, self.hfp_first,
-                    self.voice_links, self.android_auto_start, self.codec, self.le_audio))
+                    self.voice_links, self.android_auto_start, self.codec, self.le_audio,
+                    self.gatt_services, self.gatt_phone_services, self.device_info, self.gatt_updates,
+                    self.gatt_errors))
 
 
 # A source keeps sending packets while a stream is started, so a longer silence is a stall.
@@ -127,6 +138,7 @@ class ProtocolTrace:
         self.frame_labels: dict[int, str] = {}  # record index of a frame's first packet -> protocol
         self._events_by_index: Optional[dict[int, list[ProtocolEvent]]] = None
         self._last_timestamp: Optional[datetime.datetime] = None
+        self._gatt = gatt.GattTracker()
         self._cis_owner: dict[int, int] = {}  # LE Audio stream handle -> connection handle
         self._open_cis: set[int] = set()
         # (handle, direction, cid) -> protocol, for channels identified from their contents
@@ -229,6 +241,7 @@ class ProtocolTrace:
                 self._add(record, handle, "HCI", "Disconnected", detail=reason)
             self._stop_stream(record, handle, "")
             self._l2cap.forget_handle(handle)
+            self._gatt.forget(handle)
             self._candidates = [c for c in self._candidates if c[0].handle != handle]
             self._android_auto_cars.discard(handle)
             self._android_auto_ports = {k for k in self._android_auto_ports if k[0] != handle}
@@ -257,6 +270,8 @@ class ProtocolTrace:
             self._media(frame)
         elif protocol == "AVCTP":
             self._avrcp(frame)
+        elif protocol == "ATT":
+            self._att(frame)
 
     def _closed_identified_channels(self, frame: L2capFrame) -> None:
         """Report the closing of channels that were identified from their contents."""
@@ -342,6 +357,36 @@ class ProtocolTrace:
         elif accepted and sig.signal in (0x08, 0x09, 0x0A):
             self._stop_stream(frame, handle, "")
             self._started.discard(handle)
+
+    def _att(self, frame: L2capFrame) -> None:
+        msg = self._gatt.feed(frame.handle, frame.direction, frame.payload)
+        if msg is None:
+            return
+        self._add(frame, frame.handle, "GATT", msg.summary, detail=msg.detail, is_error=msg.is_error,
+                  routine=msg.routine)
+        profile = self.profile(frame.handle)
+        if msg.summary == "Services":
+            profile.gatt_services = self._gatt.services(frame.handle, "RX")
+            profile.gatt_phone_services = self._gatt.services(frame.handle, "TX")
+        if msg.is_error:
+            profile.gatt_errors.append(msg.detail)
+        if msg.value is None:
+            return
+        uuid, decoded, _ = msg.value
+        name = gatt.CHARACTERISTICS.get(uuid, "") if uuid is not None else ""
+        from_device = frame.direction == "RX"
+        if msg.summary in ("Notification", "Indication") and from_device:
+            profile.gatt_updates[name or msg.detail.split(": ")[0]] += 1
+        if decoded is None or not from_device and msg.summary != "Write":
+            return
+        if uuid in (0x2A29, 0x2A24, 0x2A26, 0x2A28, 0x2A00, 0x2A01) and from_device:
+            profile.device_info[name] = decoded
+        elif uuid == 0x2A19 and from_device:
+            profile.battery.append(int(decoded.rstrip("%")))
+        elif uuid == 0x2A37 and from_device:
+            profile.heart_rates.append(int(decoded.split()[0]))
+        elif uuid in (0x2B7D, 0x2BA3, 0x2BC3, 0x2B97) and from_device:
+            profile.gatt_states[name] = decoded
 
     def _avrcp(self, frame: L2capFrame) -> None:
         msg = avrcp.parse(frame.payload, frame.length)
@@ -626,6 +671,28 @@ def _profile_lines(p: DeviceProfiles) -> list[tuple[str, str, bool]]:
         if p.hfp_errors:
             lines.append(("", f"Phone answered {p.hfp_errors} hands-free request(s) with an error "
                               "(often unsupported features such as text messages)", False))
+    services = [s for s in p.gatt_services if s not in ("Generic Access", "Generic Attribute")]
+    if services:
+        lines.append(("GATT services", ", ".join(services), False))
+    if p.device_info:
+        lines.append(("Device info", "; ".join(f"{k}: {v}" for k, v in p.device_info.items()), False))
+    used = [s for s in p.gatt_phone_services if s not in ("Generic Access", "Generic Attribute")]
+    if used:
+        lines.append(("Uses on the phone", ", ".join(used), False))
+    if p.battery:
+        change = f"{p.battery[0]}%" if len(set(p.battery)) == 1 else f"{p.battery[0]}% -> {p.battery[-1]}%"
+        lines.append(("Battery", f"{change} ({len(p.battery)} reading(s))", False))
+    if p.heart_rates:
+        lines.append(("Heart rate", f"{len(p.heart_rates)} readings, {min(p.heart_rates)}-{max(p.heart_rates)} bpm",
+                      False))
+    if p.gatt_states:
+        lines.append(("LE Audio state", "; ".join(f"{k}: {v}" for k, v in p.gatt_states.items()), False))
+    if p.gatt_updates:
+        top = ", ".join(f"{name} x{count:,}" for name, count in p.gatt_updates.most_common(4))
+        lines.append(("GATT updates", top, False))
+    if p.gatt_errors:
+        lines.append(("", f"{len(p.gatt_errors)} GATT request(s) failed (e.g. {p.gatt_errors[0]})", True))
+
     if p.le_audio:
         closed = [(s, e) for s, e in p.le_audio if e is not None]
         total = sum(((e - s) for s, e in closed), datetime.timedelta())

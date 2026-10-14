@@ -5,7 +5,7 @@ import datetime
 import struct
 import unittest
 
-from btsnoop_parser import android_auto, avdtp, avrcp
+from btsnoop_parser import android_auto, avdtp, avrcp, gatt
 from btsnoop_parser.hfp import HfpSession, looks_like_at, split_lines
 from btsnoop_parser.l2cap import L2capDecoder
 from btsnoop_parser.protocols import ProtocolTrace, print_profiles
@@ -692,6 +692,85 @@ class TestProfiles(unittest.TestCase):
         self.assertEqual(len(profile.le_audio), 1)
         start, end = profile.le_audio[0]
         self.assertGreaterEqual((end - start).total_seconds(), 30.0)
+
+
+
+class TestGatt(unittest.TestCase):
+    def _discover(self, tracker: gatt.GattTracker) -> None:
+        """The phone (TX) discovers a Battery service and its Battery Level characteristic on the device."""
+        tracker.feed(1, "TX", bytes([0x10, 0x01, 0x00, 0xFF, 0xFF, 0x00, 0x28]))
+        tracker.feed(1, "RX", bytes([0x11, 0x06, 0x10, 0x00, 0x14, 0x00, 0x0F, 0x18]))
+        tracker.feed(1, "TX", bytes([0x08, 0x10, 0x00, 0x14, 0x00, 0x03, 0x28]))
+        # declaration at 0x0011: properties, value handle 0x0012, uuid 0x2A19
+        tracker.feed(1, "RX", bytes([0x09, 0x07, 0x11, 0x00, 0x12, 0x12, 0x00, 0x19, 0x2A]))
+
+    def test_discovery_names_handles(self):
+        tracker = gatt.GattTracker()
+        self._discover(tracker)
+        self.assertEqual(tracker.services(1, "RX"), ["Battery"])
+        tracker.feed(1, "TX", bytes([0x0A, 0x12, 0x00]))
+        msg = tracker.feed(1, "RX", bytes([0x0B, 0x50]))
+        self.assertEqual((msg.summary, msg.detail, msg.routine), ("Read Response", "Battery Level: 80%", False))
+
+    def test_unknown_handle_is_shown_raw(self):
+        msg = gatt.GattTracker().feed(1, "RX", bytes([0x1B, 0x44, 0x00, 1, 2, 3]))
+        self.assertEqual(msg.detail, "handle 0x0044: 3 bytes")
+        self.assertTrue(msg.routine)
+
+    def test_state_notifications_show_only_changes(self):
+        tracker = gatt.GattTracker()
+        self._discover(tracker)
+        first = tracker.feed(1, "RX", bytes([0x1B, 0x12, 0x00, 0x50]))
+        repeat = tracker.feed(1, "RX", bytes([0x1B, 0x12, 0x00, 0x50]))
+        change = tracker.feed(1, "RX", bytes([0x1B, 0x12, 0x00, 0x4F]))
+        self.assertEqual([first.routine, repeat.routine, change.routine], [False, True, False])
+        self.assertEqual(change.detail, "Battery Level: 79%")
+
+    def test_errors(self):
+        tracker = gatt.GattTracker()
+        end_of_discovery = tracker.feed(1, "RX", bytes([0x01, 0x10, 0x15, 0x00, 0x0A]))
+        self.assertTrue(end_of_discovery.routine)
+        self.assertFalse(end_of_discovery.is_error)
+        denied = tracker.feed(1, "RX", bytes([0x01, 0x0A, 0x12, 0x00, 0x05]))
+        self.assertTrue(denied.is_error)
+        self.assertIn("insufficient authentication", denied.detail)
+
+    def test_read_by_type_returns_the_value(self):
+        tracker = gatt.GattTracker()
+        tracker.feed(1, "TX", bytes([0x08, 0x01, 0x00, 0xFF, 0xFF, 0x00, 0x2A]))
+        msg = tracker.feed(1, "RX", bytes([0x09, 0x0B, 0x03, 0x00]) + b"My Watch\x00")
+        self.assertEqual(msg.detail, "Device Name: My Watch")
+
+    def test_values(self):
+        self.assertEqual(gatt.decode_value(0x2A37, bytes([0x00, 72])), "72 bpm")
+        self.assertEqual(gatt.decode_value(0x2A37, bytes([0x01, 0x2C, 0x01])), "300 bpm")
+        self.assertEqual(gatt.decode_value(0x2B7D, bytes([128, 0, 3])), "volume 50%")
+        self.assertEqual(gatt.decode_value(0x2BA4, bytes([0x31])), "Next Track")
+        self.assertEqual(gatt.decode_value(0x2A01, struct.pack("<H", 3 << 6)), "watch")
+        self.assertEqual(gatt.decode_value(0x2902, bytes([1, 0])), "notifications on")
+        self.assertIsNone(gatt.decode_value(0x9999, b"\x01"))
+
+    def test_uuid_names(self):
+        self.assertEqual(gatt.uuid_name(bytes([0x0D, 0x18])), "Heart Rate")
+        full = bytes.fromhex("0000180f00001000800000805f9b34fb")[::-1]
+        self.assertEqual(gatt.uuid_name(full), "Battery")
+        self.assertTrue(gatt.uuid_name(bytes(range(16))).startswith("vendor "))
+
+    def test_profile_summary(self):
+        capture = _Capture()
+        capture.event(bytes([0x3E, 0x1F, 0x0A, 0x00, _HANDLE, 0x00, 0x00, 0x00]) + _ADDR + bytes(19))
+        att = lambda direction, payload: capture.l2cap(direction, 0x0004, payload)  # noqa: E731
+        att("TX", bytes([0x10, 0x01, 0x00, 0xFF, 0xFF, 0x00, 0x28]))
+        att("RX", bytes([0x11, 0x06, 0x10, 0x00, 0x20, 0x00, 0x0D, 0x18]))
+        att("TX", bytes([0x08, 0x10, 0x00, 0x20, 0x00, 0x03, 0x28]))
+        att("RX", bytes([0x09, 0x07, 0x11, 0x00, 0x10, 0x12, 0x00, 0x37, 0x2A]))
+        for bpm in (61, 75, 68):
+            att("RX", bytes([0x1B, 0x12, 0x00, 0x00, bpm]))
+        trace = _trace(capture)
+        profile = trace.profiles["11:22:33:44:55:66"]
+        self.assertEqual(profile.gatt_services, ["Heart Rate"])
+        self.assertEqual(profile.heart_rates, [61, 75, 68])
+        self.assertEqual(profile.gatt_updates["Heart Rate Measurement"], 3)
 
 
 if __name__ == "__main__":
