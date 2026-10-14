@@ -22,3 +22,7 @@ training/checkpoints/
 
 # Synthetic training data (deterministic, regenerate via training/generate_dataset.py)
 training/data/
+
+# Android bug reports (contain personal data)
+bugreport-*/
+bugreport-*.zip
