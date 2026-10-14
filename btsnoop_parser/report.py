@@ -183,9 +183,9 @@ class SessionReport:
 class ReportBuilder:
     """Reads a capture once and assembles a :class:`SessionReport`."""
 
-    def __init__(self) -> None:
+    def __init__(self, show_personal: bool = False) -> None:
         self.stats = CaptureStats()
-        self.trace = ProtocolTrace()
+        self.trace = ProtocolTrace(show_personal=show_personal)
         self.phone = PhoneInfo()
         self._devices: dict[str, DeviceInfo] = {}
         self._connections: list[ConnectionInfo] = []
@@ -455,8 +455,8 @@ def _kind_from_profile(p: DeviceProfiles) -> Optional[str]:
     return None
 
 
-def build_report(records) -> SessionReport:
-    builder = ReportBuilder()
+def build_report(records, show_personal: bool = False) -> SessionReport:
+    builder = ReportBuilder(show_personal=show_personal)
     for record in records:
         builder.analyze_record(record)
     return builder.build()

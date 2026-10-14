@@ -65,7 +65,8 @@ Options
    for each device, and the problems found. Devices that were connected before
    the capture began are included from their traffic. With ``--json`` (or
    ``--pretty``) the report is printed as JSON. Pairing keys and other security
-   material are never included.
+   material are never included, and phone numbers are masked to their last
+   four digits.
 
 .. option:: --protocols
 
@@ -78,7 +79,9 @@ Options
    device name and model, battery, heart rate), LE Audio stream set-up (codec,
    link quality, what each stream is for, and rejected steps, recognised even
    when bonded earbuds skip discovery), LE Audio volume, mute, media and call
-   control, RFCOMM serial ports, HFP commands with a plain-English meaning, and voice
+   control, phonebook and message sync activity (what was synced, how many
+   entries, how much data, failures; contacts and message text are never
+   decoded), RFCOMM serial ports, HFP commands with a plain-English meaning, and voice
    (SCO/eSCO) links. Needs a capture that includes ACL data. Channels opened
    before the capture began are identified from their contents where that is
    reliable, and filtered (truncated) captures are reported as such.

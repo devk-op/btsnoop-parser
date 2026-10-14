@@ -31,9 +31,9 @@ def _build_capture_stats(records):
     return stats
 
 
-def _build_protocol_trace(records):
+def _build_protocol_trace(records, show_personal=False):
     from .protocols import ProtocolTrace
-    trace = ProtocolTrace()
+    trace = ProtocolTrace(show_personal=show_personal)
     for record in records:
         trace.analyze_record(record)
     return trace
@@ -127,6 +127,8 @@ def main() -> None:
         metavar="OUTPUT.pcap",
         help="Write records to a PCAP file (Wireshark-compatible, link type 201)",
     )
+    # Show phone numbers and phone/SIM identifiers instead of masking them. Deliberately undocumented.
+    parser.add_argument("--show-personal", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--no-color",
         action="store_true",
@@ -159,12 +161,12 @@ def main() -> None:
         stats = _build_capture_stats(records)
         stats.print_summary(color=not args.no_color)
         from .protocols import print_profiles
-        print_profiles(_build_protocol_trace(records), color=not args.no_color)
+        print_profiles(_build_protocol_trace(records, args.show_personal), color=not args.no_color)
         return
 
     if args.report:
         from .report import build_report, print_report
-        report = build_report(records)
+        report = build_report(records, show_personal=args.show_personal)
         if args.json or args.pretty:
             print(json.dumps(report.to_dict(), indent=2 if args.pretty else None, default=str))
         else:
@@ -173,7 +175,7 @@ def main() -> None:
 
     if args.protocols:
         from .protocols import print_trace
-        print_trace(_build_protocol_trace(records), color=not args.no_color)
+        print_trace(_build_protocol_trace(records, args.show_personal), color=not args.no_color)
         return
 
     if args.ai:
@@ -227,7 +229,8 @@ def main() -> None:
         print(json.dumps(data, indent=indent))
         return
 
-    print_table(limited, limit=args.limit, color=not args.no_color, trace=_build_protocol_trace(records))
+    print_table(limited, limit=args.limit, color=not args.no_color,
+                trace=_build_protocol_trace(records, args.show_personal))
 
     if args.decode:
         for record in limited:

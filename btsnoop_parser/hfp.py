@@ -95,11 +95,51 @@ def _volume(value: str) -> str:
     return f"{value.strip()}/15"
 
 
+# Lines that carry phone numbers, and replies that carry identifiers of the phone or SIM.
+_NUMBER_LINES = ("ATD", "+CLIP", "+CCWA", "+CNUM", "+CLCC", "+BINP")
+_IDENTITY_QUERIES = {"CGSN", "CIMI", "CNUM"}
+_NUMBER = re.compile(r"\+?\d[\d\s().-]{4,}\d")
+
+
+def mask_number(match: re.Match) -> str:
+    """Keep the last 4 digits of a phone number and hide the rest."""
+    text = match.group(0)
+    digits = sum(c.isdigit() for c in text)
+    keep, out = 4, []
+    for c in reversed(text):
+        if c.isdigit():
+            out.append(c if keep > 0 else "\u2022")
+            keep -= 1
+        else:
+            out.append(c)
+    return "".join(reversed(out)) if digits > 4 else text
+
+
 class HfpSession:
     """Describes the AT traffic of one HFP connection."""
 
     def __init__(self) -> None:
         self._indicators: list[str] = []
+        self._last_query: Optional[str] = None
+
+    def redact(self, line: str) -> str:
+        """The line with phone numbers, keypad tones and phone/SIM identifiers hidden."""
+        stripped = line.strip()
+        upper = stripped.upper()
+        command = _COMMAND.match(stripped)
+        if command:
+            self._last_query = command.group(1).upper().lstrip("+")
+            if self._last_query == "VTS":
+                return "AT+VTS=\u2022"  # keypad tones during a call can be PINs or account numbers
+            return _NUMBER.sub(mask_number, stripped) if upper.startswith("ATD") else stripped
+        if upper.startswith(_NUMBER_LINES):
+            return _NUMBER.sub(mask_number, stripped)
+        if upper in _FINAL_RESULTS:
+            self._last_query = None
+            return stripped
+        if not _RESULT.match(stripped) and self._last_query in _IDENTITY_QUERIES:
+            return "(hidden)"
+        return stripped
 
     def describe(self, line: str) -> tuple[str, bool]:
         """Return (description, is_error) for one AT command or result line."""
@@ -203,6 +243,8 @@ class HfpSession:
             return "Asks for the network operator name" if read else "Sets the operator name format"
         if name == "CNUM":
             return "Asks for the phone's own number"
+        if name == "CGSN":
+            return "Asks for the phone's serial number"
         if name == "BIA":
             return "Chooses which status updates to receive"
         if name == "BTRH":

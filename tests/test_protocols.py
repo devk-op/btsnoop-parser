@@ -5,7 +5,7 @@ import datetime
 import struct
 import unittest
 
-from btsnoop_parser import android_auto, avdtp, avrcp, gatt, le_audio
+from btsnoop_parser import android_auto, avdtp, avrcp, gatt, le_audio, obex
 from btsnoop_parser.hfp import HfpSession, looks_like_at, split_lines
 from btsnoop_parser.l2cap import L2capDecoder
 from btsnoop_parser.protocols import ProtocolTrace, print_profiles
@@ -845,6 +845,85 @@ class TestLeAudioWithoutDiscovery(unittest.TestCase):
         answer = tracker.feed(1, "RX", bytes([0x1B, 0x15, 0x01, 1, 1, 1, 0x0D, 0]))
         self.assertTrue(answer.is_error)
         self.assertIn("insufficient resources", answer.detail)
+
+
+
+class TestPersonalData(unittest.TestCase):
+    def _shown(self, lines: list[str]) -> list[str]:
+        session = HfpSession()
+        return [session.redact(line) for line in lines]
+
+    def test_numbers_keep_only_the_last_four_digits(self):
+        self.assertEqual(self._shown(['+CLIP: "+14155550123",145']), ['+CLIP: "+•••••••0123",145'])
+        self.assertEqual(self._shown(["ATD5551234;"]), ["ATD•••1234;"])
+        self.assertEqual(self._shown(['+CLCC: 1,1,4,0,0,"5551234",129']), ['+CLCC: 1,1,4,0,0,"•••1234",129'])
+
+    def test_identifiers_and_keypad_tones_are_hidden(self):
+        self.assertEqual(self._shown(["AT+CGSN", "SERIAL12345XY", "OK"]), ["AT+CGSN", "(hidden)", "OK"])
+        self.assertEqual(self._shown(["AT+VTS=7"]), ["AT+VTS=•"])
+
+    def test_other_lines_are_untouched(self):
+        self.assertEqual(self._shown(["AT+CGMR", "17 (15828068)", "+CIND: 0,0,1,5,0,5,0"]),
+                         ["AT+CGMR", "17 (15828068)", "+CIND: 0,0,1,5,0,5,0"])
+
+    def test_trace_masks_unless_asked(self):
+        def trace_for(show_personal: bool) -> list[str]:
+            capture = TestProtocolTrace()._hfp_capture()
+            capture.rfcomm("TX", 0x0041, 6, 0xEF, b'\r\n+CLIP: "5551234",129\r\n')
+            trace = ProtocolTrace(show_personal=show_personal)
+            for record in capture.records:
+                trace.analyze_record(record)
+            return [e.summary + e.detail for e in trace.events if e.protocol == "HFP"]
+        self.assertNotIn("555", " ".join(trace_for(False)))
+        self.assertIn("5551234", " ".join(trace_for(True)))
+
+
+def _ertm(obex_packet: bytes, sar: int = 0) -> bytes:
+    return bytes([0x02, sar << 6]) + obex_packet
+
+
+def _obex(code: int, headers: bytes = b"", prefix: bytes = b"") -> bytes:
+    return bytes([code]) + struct.pack(">H", 3 + len(prefix) + len(headers)) + prefix + headers
+
+
+def _text_header(header: int, value: bytes) -> bytes:
+    return bytes([header]) + struct.pack(">H", 3 + len(value)) + value
+
+
+class TestObexSync(unittest.TestCase):
+    _PBAP = bytes.fromhex("796135f0f0c511d809660800200c9a66")
+
+    def _sync(self) -> obex.ObexChannel:
+        channel, t = obex.ObexChannel(), _TS
+        feed = lambda d, packet, sar=0: channel.feed(d, _ertm(packet, sar), t)  # noqa: E731
+        self.assertIsNone(feed("RX", _obex(0x80, _text_header(0x46, self._PBAP), b"\x10\x00\x03\xed")))
+        self.assertEqual(feed("TX", _obex(0xA0, b"", b"\x10\x00\x03\xed")), ("Connect", "Phonebook (PBAP) session opened", False))
+        name = "telecom/pb.vcf\x00".encode("utf-16-be")
+        feed("RX", _obex(0x83, _text_header(0x42, b"x-bt/phonebook\x00") + _text_header(0x01, name)))
+        card = b"BEGIN:VCARD\r\nFN:Someone\r\nTEL:5551234\r\nEND:VCARD\r\n"
+        feed("TX", _obex(0x90, _text_header(0x48, card * 2)))
+        feed("TX", _obex(0xA0, _text_header(0x49, card)))
+        return channel
+
+    def test_phonebook_download_is_counted(self):
+        transfer = self._sync().transfers["phonebook (contacts)"]
+        self.assertEqual((transfer.requests, transfer.entries), (1, 3))
+        self.assertEqual(obex.describe_transfer(transfer), "phonebook (contacts): 3 entries")
+
+    def test_contents_are_never_reported(self):
+        channel = self._sync()
+        text = " ".join(obex.describe_transfer(t) for t in channel.transfers.values())
+        self.assertNotIn("Someone", text)
+        self.assertNotIn("5551234", text)
+
+    def test_failed_request(self):
+        channel = self._sync()
+        channel.feed("RX", _ertm(_obex(0x83, _text_header(0x42, b"x-bt/vcard\x00"))), _TS)
+        result = channel.feed("TX", _ertm(_obex(0xC4)), _TS)
+        self.assertEqual(result, ("Failed", "Phonebook (PBAP): single contact request failed: not found", True))
+
+    def test_supervisory_frames_are_ignored(self):
+        self.assertIsNone(obex.ObexChannel().feed("TX", bytes([0x01, 0x05]), _TS))
 
 
 if __name__ == "__main__":

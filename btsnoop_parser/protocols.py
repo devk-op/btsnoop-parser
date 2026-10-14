@@ -17,7 +17,7 @@ import datetime
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
-from . import android_auto, avdtp, avrcp, gatt
+from . import android_auto, avdtp, avrcp, gatt, obex
 from .constants import HCI_ERROR_CODES
 from .hfp import HfpSession, decode_text, looks_like_at, split_lines
 from .l2cap import L2capDecoder, L2capFrame
@@ -93,6 +93,9 @@ class DeviceProfiles:
     le_audio_uses: collections.Counter[str] = field(default_factory=collections.Counter)
     # LE Audio streams: (start, end or None while open)
     le_audio: list[tuple[datetime.datetime, Optional[datetime.datetime]]] = field(default_factory=list)
+    # Phonebook / message sync: "service" -> transfers
+    syncs: dict[str, list[obex.Transfer]] = field(default_factory=dict)
+    sync_failures: list[str] = field(default_factory=list)
     android_auto_start: Optional[datetime.datetime] = None
     android_auto_wifi: Optional[tuple[datetime.datetime, bool]] = None
 
@@ -100,7 +103,7 @@ class DeviceProfiles:
         return any((self.streams, self.buttons, self.volume_sets, self.volume_reports, self.tracks, self.hfp_first,
                     self.voice_links, self.android_auto_start, self.codec, self.le_audio,
                     self.gatt_services, self.gatt_phone_services, self.device_info, self.gatt_updates,
-                    self.gatt_errors))
+                    self.gatt_errors, self.syncs))
 
 
 # A source keeps sending packets while a stream is started, so a longer silence is a stall.
@@ -120,7 +123,9 @@ def _addr(data: bytes) -> str:
 class ProtocolTrace:
     """Decodes the protocols carried in a capture's ACL data."""
 
-    def __init__(self) -> None:
+    def __init__(self, show_personal: bool = False) -> None:
+        # Phone numbers and phone/SIM identifiers are masked unless show_personal is set.
+        self.show_personal = show_personal
         self.events: list[ProtocolEvent] = []
         self.frame_counts: collections.Counter[tuple[str, str]] = collections.Counter()
         self._l2cap = L2capDecoder()
@@ -142,6 +147,7 @@ class ProtocolTrace:
         self._events_by_index: Optional[dict[int, list[ProtocolEvent]]] = None
         self._last_timestamp: Optional[datetime.datetime] = None
         self._gatt = gatt.GattTracker()
+        self._obex: dict[tuple[int, int, int], obex.ObexChannel] = {}  # (handle, psm, channel position)
         self._cis_owner: dict[int, int] = {}  # LE Audio stream handle -> connection handle
         self._open_cis: set[int] = set()
         # (handle, direction, cid) -> protocol, for channels identified from their contents
@@ -275,6 +281,8 @@ class ProtocolTrace:
             self._avrcp(frame)
         elif protocol == "ATT":
             self._att(frame)
+        if frame.psm is not None and frame.psm >= 0x1001:
+            self._obex_frame(frame)
 
     def _closed_identified_channels(self, frame: L2capFrame) -> None:
         """Report the closing of channels that were identified from their contents."""
@@ -296,6 +304,10 @@ class ProtocolTrace:
         """Name the protocol a frame belongs to, inspecting channels whose setup was not captured."""
         if frame.protocol == "AVDTP":
             return "A2DP Media" if frame.channel_index else "AVDTP"
+        if frame.psm is not None and frame.psm >= 0x1001:
+            channel = self._obex.get((frame.handle, frame.psm, frame.channel_index or 0))
+            if channel is not None and channel.service:
+                return channel.service
         if frame.protocol != "L2CAP":
             return frame.protocol
         key = (frame.handle, frame.direction, frame.cid)
@@ -360,6 +372,23 @@ class ProtocolTrace:
         elif accepted and sig.signal in (0x08, 0x09, 0x0A):
             self._stop_stream(frame, handle, "")
             self._started.discard(handle)
+
+    def _obex_frame(self, frame: L2capFrame) -> None:
+        """Phonebook and message sync (OBEX over L2CAP): activity only, never contents."""
+        key = (frame.handle, frame.psm, frame.channel_index or 0)
+        channel = self._obex.get(key)
+        if channel is None:
+            if len(frame.payload) < 3 or frame.payload[0] & 1 or frame.payload[2] != 0x80:
+                return  # only start following a channel at its OBEX Connect
+            channel = self._obex[key] = obex.ObexChannel()
+        result = channel.feed(frame.direction, frame.payload, frame.timestamp)
+        if channel.service:
+            self.profile(frame.handle).syncs[channel.service] = list(channel.transfers.values())
+        if result is not None:
+            summary, detail, is_error = result
+            self._add(frame, frame.handle, "OBEX", summary, detail=detail, is_error=is_error)
+            if is_error:
+                self.profile(frame.handle).sync_failures.append(detail)
 
     def _att(self, frame: L2capFrame) -> None:
         msg = self._gatt.feed(frame.handle, frame.direction, frame.payload)
@@ -582,8 +611,9 @@ class ProtocolTrace:
                     profile.incoming += 1
                 elif name == "service":
                     profile.no_service = value == 0
-            summary, is_error = session.describe(line)
-            self._add(frame, frame.handle, "HFP", line.strip(), detail=summary, is_error=is_error)
+            shown = line.strip() if self.show_personal else session.redact(line)
+            summary, is_error = session.describe(shown)
+            self._add(frame, frame.handle, "HFP", shown, detail=summary, is_error=is_error)
         return True
 
 
@@ -747,6 +777,13 @@ def _profile_lines(p: DeviceProfiles) -> list[tuple[str, str, bool]]:
     for start, end, codec in p.voice_links:
         length = _span(start, end) if end else "still open at the end of the capture"
         lines.append(("Voice link", f"{_clock(start)}  {codec}, {length}", False))
+
+    for service, transfers in p.syncs.items():
+        shown = [t for t in transfers if t.requests]
+        for i, transfer in enumerate(shown or transfers[:1]):
+            lines.append((service if i == 0 else "", obex.describe_transfer(transfer), bool(transfer.failures)))
+        if not transfers:
+            lines.append((service, "connected, nothing transferred", False))
 
     if p.android_auto_start or p.android_auto_wifi:
         text = f"Started {_clock(p.android_auto_start)}" if p.android_auto_start else "Set-up seen"
