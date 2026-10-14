@@ -55,9 +55,12 @@ Options
 .. option:: --protocols
 
    Decode the protocols carried above HCI and print a timeline: L2CAP channels
-   opening and closing (labelled SDP, RFCOMM, AVDTP, ATT, ...), RFCOMM serial
-   ports, HFP commands with a plain-English meaning, and voice (SCO/eSCO) links.
-   Needs a capture that includes ACL data.
+   opening and closing (labelled SDP, RFCOMM, AVDTP, ATT, ...), A2DP streaming
+   (codec negotiation, start, pause, close, per-stream totals and stalls),
+   RFCOMM serial ports, HFP commands with a plain-English meaning, and voice
+   (SCO/eSCO) links. Needs a capture that includes ACL data. Channels opened
+   before the capture began are identified from their contents where that is
+   reliable, and filtered (truncated) captures are reported as such.
 
 .. option:: --ai
 

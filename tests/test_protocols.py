@@ -5,6 +5,7 @@ import datetime
 import struct
 import unittest
 
+from btsnoop_parser import avdtp
 from btsnoop_parser.hfp import HfpSession, looks_like_at, split_lines
 from btsnoop_parser.l2cap import L2capDecoder
 from btsnoop_parser.protocols import ProtocolTrace
@@ -20,30 +21,45 @@ class _Capture:
 
     def __init__(self) -> None:
         self.records: list[dict] = []
+        self.clock = _TS
 
-    def _add(self, packet_type: int, direction: str, payload: bytes) -> None:
+    def _add(self, packet_type: int, direction: str, payload: bytes, keep: int = 0) -> None:
+        self.clock += datetime.timedelta(milliseconds=1)
         self.records.append({
             "index": len(self.records) + 1,
-            "timestamp": _TS + datetime.timedelta(milliseconds=len(self.records)),
+            "timestamp": self.clock,
             "direction": direction,
             "packet_type": packet_type,
-            "payload": payload,
+            "payload": payload[:keep] if keep else payload,
+            "original_length": len(payload) + 1,
+            "captured_length": (min(keep, len(payload)) if keep else len(payload)) + 1,
         })
+
+    def wait(self, seconds: float) -> None:
+        self.clock += datetime.timedelta(seconds=seconds)
 
     def event(self, payload: bytes) -> None:
         self._add(0x04, "RX", payload)
 
-    def acl(self, direction: str, data: bytes, first: bool = True, handle: int = _HANDLE) -> None:
+    def acl(self, direction: str, data: bytes, first: bool = True, handle: int = _HANDLE, keep: int = 0) -> None:
         flags = 0x2 if first else 0x1
-        self._add(0x02, direction, struct.pack("<HH", handle | (flags << 12), len(data)) + data)
+        self._add(0x02, direction, struct.pack("<HH", handle | (flags << 12), len(data)) + data, keep=keep)
 
-    def l2cap(self, direction: str, cid: int, payload: bytes, split: int = 0) -> None:
+    def l2cap(self, direction: str, cid: int, payload: bytes, split: int = 0, keep: int = 0) -> None:
+        """Send an L2CAP frame; `keep` stores only the first bytes, like Android's filtered snoop mode."""
         frame = struct.pack("<HH", len(payload), cid) + payload
         if split:
             self.acl(direction, frame[:split])
             self.acl(direction, frame[split:], first=False)
         else:
-            self.acl(direction, frame)
+            self.acl(direction, frame, keep=keep)
+
+    def avdtp(self, direction: str, cid: int, label: int, message_type: int, signal: int, body: bytes = b"") -> None:
+        self.l2cap(direction, cid, bytes([(label << 4) | message_type, signal]) + body)
+
+    def media(self, cid: int, seq: int, keep: int = 0) -> None:
+        rtp = bytes([0x80, 0x60]) + struct.pack(">HII", seq, seq * 128, 1)
+        self.l2cap("TX", cid, rtp + bytes(600), keep=keep)
 
     def signal(self, direction: str, code: int, ident: int, body: bytes) -> None:
         self.l2cap(direction, 0x0001, struct.pack("<BBH", code, ident, len(body)) + body)
@@ -231,9 +247,9 @@ class TestProtocolTrace(unittest.TestCase):
         capture.rfcomm("TX", 0x0041, 6, 0xEF, b"\r\n+BRSF: 8\r\n\r\nOK\r\n")
         trace = _trace(capture)
 
-        self.assertEqual([e.protocol for e in trace.events], ["L2CAP", "RFCOMM", "HFP", "HFP", "HFP"])
-        self.assertEqual(trace.events[1].summary, "Opening serial port 3")
-        self.assertEqual([e.summary for e in trace.events[2:]], ["AT+BRSF=128", "+BRSF: 8", "OK"])
+        self.assertEqual([e.protocol for e in trace.events], ["HCI", "L2CAP", "RFCOMM", "HFP", "HFP", "HFP"])
+        self.assertEqual(trace.events[2].summary, "Opening serial port 3")
+        self.assertEqual([e.summary for e in trace.events[3:]], ["AT+BRSF=128", "+BRSF: 8", "OK"])
         self.assertTrue(all(e.device == "11:22:33:44:55:66" for e in trace.events))
         self.assertEqual(trace.frame_counts[("11:22:33:44:55:66", "RFCOMM")], 3)
         self.assertEqual(trace.serial_ports[("11:22:33:44:55:66", 3)], [2, 30, True])
@@ -275,6 +291,162 @@ class TestProtocolTrace(unittest.TestCase):
         capture.event(bytes([0x05, 0x04, 0x00]) + struct.pack("<H", _HANDLE) + bytes([0x13]))
         capture.rfcomm("RX", 0x0052, 6, 0xEF, b"AT+CHUP\r")
         self.assertFalse([e for e in _trace(capture).events if e.protocol == "HFP"])
+
+
+_SBC_CONFIG = bytes([0x07, 0x06, 0x00, 0x00, 0x21, 0x15, 0x02, 0x35])  # SBC 44.1 kHz joint stereo, bitpool 2-53
+_SIG, _MEDIA = 0x0041, 0x0042  # host's CIDs; the remote's are 0x0051 and 0x0052
+
+
+class TestAvdtp(unittest.TestCase):
+    def _describe(self, payload: bytes) -> tuple[str, bool]:
+        return avdtp.describe(avdtp.parse_signal(payload))
+
+    def test_parse_header(self):
+        sig = avdtp.parse_signal(bytes([0x50, 0x09, 0x10]))
+        self.assertEqual((sig.label, sig.message_type, sig.signal, sig.name), (5, 0, 0x09, "Suspend"))
+        self.assertIsNone(avdtp.parse_signal(bytes([0x58, 0x01])))  # continuation packet
+
+    def test_discover_answer_lists_endpoints(self):
+        text, _ = self._describe(bytes([0x02, 0x01, 0x04, 0x08, 0x0A, 0x08]))
+        self.assertEqual(text, "Endpoints: 1 (audio sink), 2 (audio sink, in use)")
+
+    def test_capabilities_name_codecs_and_features(self):
+        ldac = bytes([0x07, 0x0A, 0x00, 0xFF]) + struct.pack("<IH", 0x012D, 0x00AA) + bytes(2)
+        text, _ = self._describe(bytes([0x02, 0x0C]) + _SBC_CONFIG + ldac + bytes([0x08, 0x00]))
+        self.assertEqual(text, "Supports SBC 44.1 kHz joint stereo, bitpool 2-53, LDAC; delay reporting")
+
+    def test_set_configuration(self):
+        text, _ = self._describe(bytes([0x30, 0x03, 0x04, 0x04, 0x01, 0x00]) + _SBC_CONFIG)
+        self.assertEqual(text, "Configures the stream: SBC 44.1 kHz joint stereo, bitpool 2-53")
+
+    def test_aac_sample_rate(self):
+        aac = bytes([0x00, 0x02, 0x80, 0x01, 0x8C, 0x84, 0x00, 0x00])  # 44.1 kHz / 48 kHz
+        self.assertEqual(avdtp.describe_codec(aac), "AAC 44.1 kHz/48 kHz")
+
+    def test_reject_gives_reason(self):
+        self.assertEqual(self._describe(bytes([0x33, 0x03, 0x07, 0xC2])), ("Set Configuration rejected: codec type not supported", True))
+        self.assertEqual(self._describe(bytes([0x33, 0x07, 0x04, 0x31])), ("Start rejected: wrong state for this command", True))
+        self.assertEqual(self._describe(bytes([0x31, 0x06])), ("Open not understood by the other device", True))
+
+    def test_delay_report(self):
+        self.assertEqual(self._describe(bytes([0x40, 0x0D, 0x04, 0x05, 0xDC]))[0], "Reports an audio delay of 150.0 ms")
+
+    def test_start_and_suspend(self):
+        self.assertEqual(self._describe(bytes([0x50, 0x07, 0x04]))[0], "Asks to start streaming audio")
+        self.assertEqual(self._describe(bytes([0x52, 0x09]))[0], "Audio stream paused")
+
+    def test_media_packet_detection(self):
+        self.assertTrue(avdtp.is_media_packet(bytes([0x80, 0x60]), 600))
+        self.assertFalse(avdtp.is_media_packet(bytes([0x80, 0x60]), 20))
+        self.assertFalse(avdtp.is_media_packet(bytes([0x22, 0x11]), 600))
+
+
+class TestA2dpTrace(unittest.TestCase):
+    def _connected(self) -> _Capture:
+        capture = _Capture()
+        capture.connected()
+        return capture
+
+    def _session(self) -> _Capture:
+        capture = self._connected()
+        capture.open_channel(psm=0x0019, scid=_SIG, dcid=0x0051, ident=1)
+        capture.avdtp("RX", 0x0051, 3, 0, 0x03, bytes([0x04, 0x04]) + _SBC_CONFIG)
+        capture.avdtp("TX", _SIG, 3, 2, 0x03)
+        capture.open_channel(psm=0x0019, scid=_MEDIA, dcid=0x0052, ident=2)
+        capture.avdtp("RX", 0x0051, 4, 0, 0x07, bytes([0x04]))
+        capture.avdtp("TX", _SIG, 4, 2, 0x07)
+        return capture
+
+    def _a2dp(self, trace: ProtocolTrace) -> list[tuple[str, str]]:
+        trace.finish()
+        return [(e.summary, e.detail) for e in trace.events if e.protocol == "A2DP"]
+
+    def test_full_session(self):
+        capture = self._session()
+        for seq in range(3):
+            capture.media(_MEDIA, seq)
+        capture.wait(1.0)
+        capture.avdtp("RX", 0x0051, 5, 0, 0x09, bytes([0x04]))
+        capture.avdtp("TX", _SIG, 5, 2, 0x09)
+        trace = _trace(capture)
+
+        events = self._a2dp(trace)
+        self.assertEqual([s for s, _ in events], ["Set Configuration", "Set Configuration accept", "Start",
+                                                 "Start accept", "Suspend", "Suspend accept", "Stream summary"])
+        self.assertEqual(events[0][1], "Configures the stream: SBC 44.1 kHz joint stereo, bitpool 2-53")
+        self.assertTrue(events[-1][1].startswith("0.0 s of SBC 44.1 kHz joint stereo, bitpool 2-53 audio: 3 packets"))
+        self.assertEqual(trace.frame_counts[("11:22:33:44:55:66", "A2DP Media")], 3)
+        self.assertEqual(trace.frame_counts[("11:22:33:44:55:66", "AVDTP")], 6)
+
+    def test_stall_is_flagged(self):
+        capture = self._session()
+        capture.media(_MEDIA, 1)
+        capture.wait(3.0)
+        capture.media(_MEDIA, 2)
+        stall = [d for s, d in self._a2dp(_trace(capture)) if s == "Audio stalled"]
+        self.assertEqual(len(stall), 1)
+        self.assertTrue(stall[0].startswith("No audio sent for 3.0 s"))
+
+    def test_disconnect_ends_stream(self):
+        capture = self._session()
+        capture.media(_MEDIA, 1)
+        capture.event(bytes([0x05, 0x04, 0x00]) + struct.pack("<H", _HANDLE) + bytes([0x13]))
+        trace = _trace(capture)
+        trace.finish()
+        tail = [(e.protocol, e.summary) for e in trace.events][-2:]
+        self.assertEqual(tail, [("A2DP", "Stream summary"), ("HCI", "Disconnected")])
+
+    def test_stream_running_at_end_of_capture(self):
+        capture = self._session()
+        capture.media(_MEDIA, 1)
+        summary = self._a2dp(_trace(capture))[-1]
+        self.assertTrue(summary[1].endswith("(still streaming when the capture ended)"))
+
+
+class TestChannelsOpenedBeforeCapture(unittest.TestCase):
+    """Filtered btsnooz captures often begin after the channels were set up."""
+
+    def test_media_found_from_rtp_header(self):
+        capture = _Capture()
+        capture.media(0x0061, 1, keep=15)
+        capture.media(0x0061, 2, keep=15)
+        trace = _trace(capture)
+        trace.finish()
+        events = [(e.summary, e.detail) for e in trace.events]
+        self.assertEqual(events[0], ("Audio streaming", "Already streaming when the capture began"))
+        self.assertIn("2 packets", events[-1][1])
+        self.assertEqual(trace.truncated_frames, 2)
+
+    def test_signaling_found_from_command_and_answer(self):
+        capture = _Capture()
+        capture.avdtp("TX", 0x005C, 5, 0, 0x09, bytes([0x10]))
+        capture.avdtp("RX", 0x004A, 5, 2, 0x09)
+        capture.avdtp("RX", 0x004A, 11, 0, 0x08, bytes([0x14]))
+        trace = _trace(capture)
+        self.assertEqual([e.summary for e in trace.events], ["Suspend", "Suspend accept", "Close"])
+        self.assertEqual(trace.frame_counts[("handle 0x00B", "AVDTP")], 3)
+        self.assertNotIn(("handle 0x00B", "L2CAP"), trace.frame_counts)
+
+    def test_unanswered_lookalike_is_not_avdtp(self):
+        capture = _Capture()
+        capture.l2cap("TX", 0x0066, bytes([0x00, 0x01]))  # could be an AVDTP Discover, but nothing answers
+        capture.l2cap("TX", 0x0066, bytes([0x02, 0x01, 0x81, 0x00]))
+        trace = _trace(capture)
+        self.assertEqual(trace.events, [])
+        self.assertEqual(trace.frame_counts[("handle 0x00B", "L2CAP")], 2)
+
+    def test_closing_an_identified_channel(self):
+        capture = _Capture()
+        capture.media(0x0061, 1)
+        capture.signal("RX", 0x06, 9, struct.pack("<HH", 0x0069, 0x0061))
+        trace = _trace(capture)
+        self.assertIn("A2DP audio channel closed", [e.summary for e in trace.events])
+
+    def test_truncated_frame_keeps_declared_length(self):
+        capture = _Capture()
+        capture.l2cap("RX", 0x0004, bytes(100), keep=12)
+        frame = L2capDecoder().feed(capture.records[0])
+        self.assertEqual((frame.length, len(frame.payload), frame.truncated), (100, 4, True))
 
 
 if __name__ == "__main__":

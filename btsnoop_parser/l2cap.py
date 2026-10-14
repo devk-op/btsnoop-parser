@@ -85,6 +85,12 @@ class L2capFrame:
     psm: Optional[int]
     protocol: str
     payload: bytes
+    # The frame's length as declared in its header; larger than len(payload) when truncated.
+    length: int = 0
+    # True when the capture stored only the start of the frame (Android's filtered snoop mode).
+    truncated: bool = False
+    # 0 for the first channel opened for this PSM on the connection, 1 for the second, ...
+    channel_index: Optional[int] = None
     # (text, is_error) pairs describing channel setup/teardown carried by a signaling frame.
     notes: list[tuple[str, bool]] = field(default_factory=list)
 
@@ -99,10 +105,12 @@ class L2capDecoder:
         self._channels: dict[tuple[int, str], dict[int, int]] = {}
         # (handle, direction of the request, identifier) -> (psm, source CIDs)
         self._pending: dict[tuple[int, str, int], tuple[int, list[int]]] = {}
+        # (handle, direction the data travels) -> {cid: position among channels opened for its PSM}
+        self._order: dict[tuple[int, str], dict[int, int]] = {}
 
     def forget_handle(self, handle: int) -> None:
         """Drop all state for a connection handle (call when it disconnects)."""
-        for store in (self._partial, self._channels, self._pending):
+        for store in (self._partial, self._channels, self._pending, self._order):
             for key in [k for k in store if k[0] == handle]:
                 del store[key]
 
@@ -128,10 +136,14 @@ class L2capDecoder:
         buffer = partial[2]
         if partial[1] is None and len(buffer) >= 4:
             partial[1] = _u16(buffer, 0) + 4
-        if partial[1] is None or len(buffer) < partial[1]:
+        # A record the capture cut short will never be completed by later fragments.
+        truncated = record.get("captured_length", 0) < record.get("original_length", 0)
+        if partial[1] is None or (len(buffer) < partial[1] and not truncated):
             return None
 
         del self._partial[key]
+        if partial[1] is None:
+            return None
         cid = _u16(buffer, 2)
         payload = bytes(buffer[4:partial[1]])
         psm = self._channels.get(key, {}).get(cid)
@@ -150,6 +162,9 @@ class L2capDecoder:
             psm=psm,
             protocol=protocol,
             payload=payload,
+            length=partial[1] - 4,
+            truncated=len(payload) < partial[1] - 4,
+            channel_index=self._order.get(key, {}).get(cid),
         )
         if cid in _SIGNALING_CIDS:
             self._signaling(frame)
@@ -167,8 +182,12 @@ class L2capDecoder:
 
     def _open(self, frame: L2capFrame, psm: int, scid: int, dcid: int) -> None:
         # The requester receives on its source CID; the responder (this frame's sender) on the destination CID.
+        # A2DP tells its channels apart by order: the first AVDTP channel open on a link is signaling.
+        position = sum(1 for p in self._channels.get((frame.handle, frame.direction), {}).values() if p == psm)
         self._channels.setdefault((frame.handle, frame.direction), {})[scid] = psm
         self._channels.setdefault((frame.handle, _other(frame.direction)), {})[dcid] = psm
+        self._order.setdefault((frame.handle, frame.direction), {})[scid] = position
+        self._order.setdefault((frame.handle, _other(frame.direction)), {})[dcid] = position
         frame.notes.append((f"{psm_name(psm)} channel opened", False))
 
     def _command(self, frame: L2capFrame, code: int, ident: int, body: bytes) -> None:
@@ -196,6 +215,8 @@ class L2capDecoder:
             dcid, scid = _u16(body, 0), _u16(body, 2)
             psm = self._channels.get((handle, direction), {}).pop(dcid, None)
             self._channels.get((handle, _other(direction)), {}).pop(scid, None)
+            self._order.get((handle, direction), {}).pop(dcid, None)
+            self._order.get((handle, _other(direction)), {}).pop(scid, None)
             if psm is not None:
                 frame.notes.append((f"{psm_name(psm)} channel closed", False))
 
