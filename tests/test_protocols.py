@@ -5,7 +5,7 @@ import datetime
 import struct
 import unittest
 
-from btsnoop_parser import android_auto, avdtp, avrcp, gatt
+from btsnoop_parser import android_auto, avdtp, avrcp, gatt, le_audio
 from btsnoop_parser.hfp import HfpSession, looks_like_at, split_lines
 from btsnoop_parser.l2cap import L2capDecoder
 from btsnoop_parser.protocols import ProtocolTrace, print_profiles
@@ -771,6 +771,79 @@ class TestGatt(unittest.TestCase):
         self.assertEqual(profile.gatt_services, ["Heart Rate"])
         self.assertEqual(profile.heart_rates, [61, 75, 68])
         self.assertEqual(profile.gatt_updates["Heart Rate Measurement"], 3)
+
+
+
+# Real stream set-up from a Pixel phone to LE Audio earbuds (Google vendor codec).
+_CONFIG_CODEC = bytes.fromhex("0101010302ffe00001001302010802020205030300000003")
+_CONFIG_QOS = bytes.fromhex("0201010100204e000003e0010db400204e00")
+_ENABLE_MEDIA = bytes.fromhex("0301010703020400020502")
+_LC3_CODEC = bytes([0x06, 0, 0, 0, 0])
+_LC3_48K_10MS_120 = bytes([2, 0x01, 0x08, 2, 0x02, 0x01, 3, 0x04, 120, 0])
+
+
+class TestLeAudio(unittest.TestCase):
+    def test_control_commands(self):
+        self.assertEqual(le_audio.describe_control(_CONFIG_CODEC, False)[0],
+                         "Config Codec: stream 1: Google vendor codec 0x0001")
+        self.assertEqual(le_audio.describe_control(_CONFIG_QOS, False)[0],
+                         "Config QoS: stream 1: 480-byte packets every 20 ms, up to 192 kbps, latency 180 ms, "
+                         "playback delay 20 ms")
+        self.assertEqual(le_audio.describe_control(_ENABLE_MEDIA, False)[0], "Enable: stream 1 for media")
+
+    def test_control_answers(self):
+        self.assertEqual(le_audio.describe_control(bytes([1, 1, 1, 0, 0]), True), ("Config Codec: stream 1 ok", False))
+        text, failed = le_audio.describe_control(bytes([1, 1, 1, 0x07, 0x01]), True)
+        self.assertTrue(failed)
+        self.assertEqual(text, "Config Codec: stream 1 unsupported setting (codec)")
+
+    def test_lc3_settings(self):
+        self.assertEqual(le_audio.describe_codec(_LC3_CODEC, _LC3_48K_10MS_120), "LC3 48 kHz, 10 ms frames, 96 kbps per channel")
+
+    def test_ase_states(self):
+        self.assertEqual(le_audio.describe_ase(bytes.fromhex("010401000703020400020502")), "stream 1 streaming for media")
+        self.assertEqual(le_audio.describe_ase(bytes([1, 6])), "stream 1 releasing")
+
+    def test_capabilities_and_contexts(self):
+        pac = bytes([1]) + _LC3_CODEC + bytes([4, 3, 0x01, 0xA4, 0x00, 0])  # 16, 32, 48 kHz
+        self.assertEqual(le_audio.describe_pac(pac), "LC3 (16/32/48 kHz)")
+        self.assertEqual(le_audio.describe_contexts(bytes([0x06, 0x00, 0x02, 0x00])),
+                         "listening: calls, media; microphone: calls")
+        self.assertEqual(le_audio.describe_locations(bytes([0x03, 0, 0, 0])), "left and right")
+
+    def test_calls(self):
+        self.assertEqual(le_audio.describe_calls(bytes([1, 0, 0, 2, 3, 0])), "call 1 incoming; call 2 active")
+        self.assertEqual(le_audio.describe_call_control(bytes([0, 1]), False), ("Accept call", False))
+        self.assertEqual(le_audio.describe_call_control(bytes([1, 1, 0]), True), ("End call: done", False))
+
+
+class TestLeAudioWithoutDiscovery(unittest.TestCase):
+    """Bonded earbuds skip discovery; stream control is recognised from command and answer."""
+
+    def _setup(self) -> gatt.GattTracker:
+        tracker = gatt.GattTracker()
+        tracker.feed(1, "TX", bytes([0x52, 0x15, 0x01]) + _CONFIG_CODEC)
+        return tracker
+
+    def test_control_point_recognised_from_its_answer(self):
+        tracker = self._setup()
+        answer = tracker.feed(1, "RX", bytes([0x1B, 0x15, 0x01, 1, 1, 1, 0, 0]))
+        self.assertEqual(answer.detail,
+                         "ASE Control Point: Config Codec: stream 1: Google vendor codec 0x0001 -> stream 1 ok")
+        self.assertFalse(answer.routine)
+        state = tracker.feed(1, "RX", bytes([0x1B, 0x02, 0x01]) + bytes.fromhex("010401000703020400020502"))
+        self.assertEqual(state.detail, "Audio Stream Endpoint: stream 1 streaming for media")
+
+    def test_unanswered_lookalike_is_not_recognised(self):
+        tracker = self._setup()
+        other = tracker.feed(1, "RX", bytes([0x1B, 0x15, 0x01, 9, 9]))
+        self.assertEqual(other.detail, "handle 0x0115: 2 bytes")
+
+    def test_failed_answer_is_an_error(self):
+        tracker = self._setup()
+        answer = tracker.feed(1, "RX", bytes([0x1B, 0x15, 0x01, 1, 1, 1, 0x0D, 0]))
+        self.assertTrue(answer.is_error)
+        self.assertIn("insufficient resources", answer.detail)
 
 
 if __name__ == "__main__":

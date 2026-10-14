@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+from . import le_audio
+
 SERVICES = {
     0x1800: "Generic Access", 0x1801: "Generic Attribute", 0x1802: "Immediate Alert", 0x1803: "Link Loss",
     0x1804: "Tx Power", 0x1805: "Current Time", 0x1808: "Glucose", 0x1809: "Health Thermometer",
@@ -80,6 +82,8 @@ _REQUESTS = {0x02, 0x04, 0x06, 0x08, 0x0A, 0x0C, 0x0E, 0x10, 0x12, 0x16, 0x18, 0
 _TEXT = {0x2A00, 0x2A24, 0x2A25, 0x2A26, 0x2A27, 0x2A28, 0x2A29, 0x2B93, 0x2B97, 0x2BB3}
 # Characteristics whose notifications report a state worth showing when it changes.
 _STATEFUL = {0x2A19, 0x2B7D, 0x2BA3, 0x2BC3, 0x2B97, 0x2BBD}
+# Characteristics whose every notification matters (stream setup steps and their answers).
+_ALWAYS_SHOWN = {0x2BC6, 0x2BC4, 0x2BC5, 0x2BBE}
 
 _MEDIA_STATES = {0: "inactive", 1: "playing", 2: "paused", 3: "seeking"}
 _MEDIA_COMMANDS = {
@@ -124,10 +128,27 @@ def _short(uuid: bytes) -> Optional[int]:
     return int.from_bytes(uuid, "little") if len(uuid) == 2 else None
 
 
-def decode_value(uuid: Optional[int], value: bytes) -> Optional[str]:
-    """Plain-English value of a known characteristic, or None if the format is unknown."""
+def decode_value(uuid: Optional[int], value: bytes, notified: bool = False) -> Optional[str]:
+    """Plain-English value of a known characteristic, or None if the format is unknown.
+
+    ``notified`` tells a control point's answer (sent by the server) from a command written to it.
+    """
     if uuid is None or not value:
         return None
+    if uuid == 0x2BC6:
+        return le_audio.describe_control(value, notified)[0]
+    if uuid in (0x2BC4, 0x2BC5):
+        return le_audio.describe_ase(value)
+    if uuid in (0x2BC9, 0x2BCB):
+        return le_audio.describe_pac(value)
+    if uuid in (0x2BCD, 0x2BCE):
+        return le_audio.describe_contexts(value)
+    if uuid in (0x2BCA, 0x2BCC):
+        return le_audio.describe_locations(value)
+    if uuid == 0x2BBD:
+        return le_audio.describe_calls(value)
+    if uuid == 0x2BBE:
+        return le_audio.describe_call_control(value, notified)[0]
     if uuid in _TEXT:
         return value.decode("utf-8", "replace").rstrip("\x00")
     if uuid == 0x2A19:
@@ -171,6 +192,10 @@ class _Database:
 
     services: list[tuple[int, int, bytes]] = field(default_factory=list)  # (start, end, uuid)
     attributes: dict[int, bytes] = field(default_factory=dict)  # handle -> uuid
+    # Handles identified from their contents when discovery was not captured: handle -> (uuid, name)
+    inferred: dict[int, tuple[int, str]] = field(default_factory=dict)
+    control_commands: dict[int, bytes] = field(default_factory=dict)  # handle -> last ASE-like command
+    ase_ids: set[int] = field(default_factory=set)
 
 
 @dataclass
@@ -204,7 +229,11 @@ class GattTracker:
 
     def _name(self, db: _Database, att_handle: int) -> str:
         uuid = db.attributes.get(att_handle)
-        return uuid_name(uuid) if uuid else f"handle 0x{att_handle:04X}"
+        if uuid:
+            return uuid_name(uuid)
+        if att_handle in db.inferred:
+            return db.inferred[att_handle][1]
+        return f"handle 0x{att_handle:04X}"
 
     def feed(self, handle: int, direction: str, payload: bytes) -> Optional[GattMessage]:
         if not payload:
@@ -270,9 +299,19 @@ class GattTracker:
     def _value_message(self, handle: int, server: str, db: _Database, opcode: int, att_handle: int,
                        value: bytes) -> GattMessage:
         uuid_bytes = db.attributes.get(att_handle)
-        uuid = _short(uuid_bytes) if uuid_bytes else None
+        uuid = _short(uuid_bytes) if uuid_bytes else db.inferred.get(att_handle, (None, ""))[0]
+        notified = opcode in (0x1B, 0x1D)
+        if uuid is None:
+            uuid, _ = self._infer(db, att_handle, opcode, value)
         target = self._name(db, att_handle)
-        decoded = decode_value(uuid, value) if opcode != 0x0A else None
+        decoded = decode_value(uuid, value, notified) if opcode != 0x0A else None
+        if uuid == 0x2BC6 and opcode in (0x12, 0x52):
+            db.control_commands[att_handle] = value
+        elif uuid == 0x2BC6 and notified and decoded is not None:
+            # Show the command with its answer: "Config QoS: stream 1: ... -> stream 1 ok".
+            command = db.control_commands.get(att_handle)
+            if command is not None and le_audio.answers(command, value):
+                decoded = le_audio.describe_control(command, False)[0] + " -> " + decoded.split(": ", 1)[-1]
         shown = decoded if decoded is not None else (f"{len(value)} bytes" if value else "")
         if opcode == 0x0A:
             return GattMessage("Read", f"Reads {target}", False, True)
@@ -280,7 +319,7 @@ class GattTracker:
             return GattMessage("Read Response", f"{target}: {shown}", False, decoded is None,
                                (uuid, decoded, value) if decoded is not None else None)
         if opcode in (0x12, 0x52, 0x16):
-            routine = uuid == 0x2902 or decoded is None
+            routine = uuid == 0x2902 or decoded is None or uuid == 0x2BC6  # shown with its answer
             return GattMessage("Write", f"Writes {target}: {shown}", False, routine,
                                (uuid, decoded, value) if decoded is not None else None)
         # Notification or indication: show it when a known state changes.
@@ -288,6 +327,32 @@ class GattTracker:
         changed = self._last_values.get(key) != value
         self._last_values[key] = value
         kind = "Notification" if opcode == 0x1B else "Indication"
-        routine = not (uuid in _STATEFUL and changed)
-        return GattMessage(kind, f"{target}: {shown}", False, routine,
+        routine = not ((uuid in _STATEFUL and changed) or uuid in _ALWAYS_SHOWN)
+        failed = False
+        if uuid == 0x2BC6:
+            failed = le_audio.describe_control(value, True)[1]
+        elif uuid == 0x2BBE:
+            failed = le_audio.describe_call_control(value, True)[1]
+        return GattMessage(kind, f"{target}: {shown}", failed, routine,
                            (uuid, decoded, value) if decoded is not None else (uuid, None, value))
+
+    def _infer(self, db: _Database, att_handle: int, opcode: int, value: bytes) -> tuple[Optional[int], str]:
+        """Recognise LE Audio stream-control handles whose discovery was not captured.
+
+        The ASE Control Point is recognised when a command-shaped write is answered by a
+        matching notification on the same handle; ASE state handles then by their stream ids.
+        """
+        if opcode in (0x12, 0x52) and le_audio.looks_like_control_command(value):
+            db.control_commands[att_handle] = value
+            return None, ""
+        if opcode != 0x1B:
+            return None, ""
+        command = db.control_commands.get(att_handle)
+        if command is not None and le_audio.answers(command, value):
+            db.inferred[att_handle] = (0x2BC6, "ASE Control Point")
+            db.ase_ids.update(value[i] for i in range(2, len(value), 3))
+            return 0x2BC6, ""
+        if db.ase_ids and le_audio.looks_like_ase(value, db.ase_ids):
+            db.inferred[att_handle] = (0x2BC4, "Audio Stream Endpoint")
+            return 0x2BC4, ""
+        return None, ""

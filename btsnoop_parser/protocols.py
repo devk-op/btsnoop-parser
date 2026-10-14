@@ -88,6 +88,9 @@ class DeviceProfiles:
     gatt_states: dict[str, str] = field(default_factory=dict)
     gatt_updates: collections.Counter[str] = field(default_factory=collections.Counter)
     gatt_errors: list[str] = field(default_factory=list)
+    le_audio_codec: str = ""
+    le_audio_qos: str = ""
+    le_audio_uses: collections.Counter[str] = field(default_factory=collections.Counter)
     # LE Audio streams: (start, end or None while open)
     le_audio: list[tuple[datetime.datetime, Optional[datetime.datetime]]] = field(default_factory=list)
     android_auto_start: Optional[datetime.datetime] = None
@@ -372,11 +375,12 @@ class ProtocolTrace:
             profile.gatt_errors.append(msg.detail)
         if msg.value is None:
             return
-        uuid, decoded, _ = msg.value
+        uuid, decoded, raw = msg.value
         name = gatt.CHARACTERISTICS.get(uuid, "") if uuid is not None else ""
         from_device = frame.direction == "RX"
+        self._le_audio_facts(profile, uuid, raw, msg.summary, from_device, frame.timestamp)
         if msg.summary in ("Notification", "Indication") and from_device:
-            profile.gatt_updates[name or msg.detail.split(": ")[0]] += 1
+            profile.gatt_updates[msg.detail.split(": ")[0]] += 1
         if decoded is None or not from_device and msg.summary != "Write":
             return
         if uuid in (0x2A29, 0x2A24, 0x2A26, 0x2A28, 0x2A00, 0x2A01) and from_device:
@@ -387,6 +391,37 @@ class ProtocolTrace:
             profile.heart_rates.append(int(decoded.split()[0]))
         elif uuid in (0x2B7D, 0x2BA3, 0x2BC3, 0x2B97) and from_device:
             profile.gatt_states[name] = decoded
+
+    @staticmethod
+    def _le_audio_facts(profile: DeviceProfiles, uuid: Optional[int], raw: bytes, kind: str,
+                        from_device: bool, when: datetime.datetime) -> None:
+        """Stream setup, buttons, volume and calls carried over LE Audio's GATT services."""
+        from . import le_audio
+        if not raw:
+            return
+        if uuid in (0x2BC4, 0x2BC5) and len(raw) >= 2:
+            state = raw[1]
+            if state == 1 and len(raw) >= 25:
+                profile.le_audio_codec = le_audio.describe_codec(raw[19:24], raw[25:25 + raw[24]])
+            elif state == 2 and len(raw) >= 17:
+                profile.le_audio_qos = le_audio._qos(raw, 4)
+            elif state == 4 and len(raw) >= 5:
+                mask = le_audio.metadata_contexts(raw[5:5 + raw[4]])
+                profile.le_audio_uses[le_audio.contexts(mask) if mask is not None else "unspecified"] += 1
+        elif uuid == 0x2BA4 and kind == "Write" and from_device:
+            command = gatt.decode_value(0x2BA4, raw)
+            if command:
+                profile.buttons[command] += 1
+        elif uuid == 0x2B7E and kind == "Write" and not from_device and raw[0] == 0x04 and len(raw) >= 3:
+            profile.volume_sets.append((when, round(raw[2] * 100 / 255)))
+        elif uuid == 0x2B7D and kind in ("Notification", "Indication", "Read Response") and from_device:
+            profile.volume_reports.append((when, round(raw[0] * 100 / 255)))
+        elif uuid == 0x2BBD and kind in ("Notification", "Indication"):
+            for _, state in le_audio.call_states(raw):
+                if state == "incoming":
+                    profile.incoming += 1
+                elif state == "active":
+                    profile.calls += 1
 
     def _avrcp(self, frame: L2capFrame) -> None:
         msg = avrcp.parse(frame.payload, frame.length)
@@ -693,11 +728,18 @@ def _profile_lines(p: DeviceProfiles) -> list[tuple[str, str, bool]]:
     if p.gatt_errors:
         lines.append(("", f"{len(p.gatt_errors)} GATT request(s) failed (e.g. {p.gatt_errors[0]})", True))
 
-    if p.le_audio:
+    if p.le_audio or p.le_audio_codec:
         closed = [(s, e) for s, e in p.le_audio if e is not None]
         total = sum(((e - s) for s, e in closed), datetime.timedelta())
         lines.append(("LE Audio", f"{len(p.le_audio)} audio stream(s), "
                                   f"{_span(datetime.datetime.min, datetime.datetime.min + total)} in total", False))
+        if p.le_audio_codec:
+            lines.append(("", f"Codec: {p.le_audio_codec}", False))
+        if p.le_audio_qos:
+            lines.append(("", f"Link: {p.le_audio_qos}", False))
+        if p.le_audio_uses:
+            uses = ", ".join(f"{use} x{count}" for use, count in p.le_audio_uses.most_common())
+            lines.append(("", f"Streams used for: {uses}", False))
         for start, end in p.le_audio[:8]:
             lines.append(("", f"{_clock(start)} - {_clock(end) + '  ' + _span(start, end) if end else 'still open'}", False))
         if len(p.le_audio) > 8:

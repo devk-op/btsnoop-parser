@@ -63,8 +63,10 @@ Options
    AVRCP remote control (buttons, volume, play status, track changes; routine
    polling is hidden), wireless Android Auto start-up (the car's Wi-Fi
    password is never shown), GATT over LE (services named from discovery,
-   device name and model, battery, heart rate, LE Audio volume, mute and media
-   state), RFCOMM serial ports, HFP commands with a plain-English meaning, and voice
+   device name and model, battery, heart rate), LE Audio stream set-up (codec,
+   link quality, what each stream is for, and rejected steps, recognised even
+   when bonded earbuds skip discovery), LE Audio volume, mute, media and call
+   control, RFCOMM serial ports, HFP commands with a plain-English meaning, and voice
    (SCO/eSCO) links. Needs a capture that includes ACL data. Channels opened
    before the capture began are identified from their contents where that is
    reliable, and filtered (truncated) captures are reported as such.
