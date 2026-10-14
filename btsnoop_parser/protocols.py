@@ -2,7 +2,8 @@
 
 :class:`ProtocolTrace` feeds every record through the L2CAP decoder, counts
 traffic per protocol, and builds a timeline of the decoded exchanges (channel
-setup, RFCOMM ports, HFP commands, A2DP streaming, voice links).
+setup, RFCOMM ports, HFP commands, A2DP streaming, AVRCP remote control,
+voice links).
 
 Captures often start after a connection's channels were opened, so a channel
 whose setup was not seen is identified from its contents where that is
@@ -16,7 +17,7 @@ import datetime
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
-from . import avdtp
+from . import avdtp, avrcp
 from .constants import HCI_ERROR_CODES
 from .hfp import HfpSession, decode_text, looks_like_at, split_lines
 from .l2cap import L2capDecoder, L2capFrame
@@ -38,6 +39,8 @@ class ProtocolEvent:
     summary: str
     detail: str = ""
     is_error: bool = False
+    # Bookkeeping traffic (status polls, acknowledgements) that print_trace leaves out.
+    routine: bool = False
 
 
 @dataclass
@@ -99,14 +102,14 @@ class ProtocolTrace:
             if frame is not None:
                 self._frame(frame)
 
-    def _add(self, source: Any, handle: int, protocol: str, summary: str,
-             detail: str = "", is_error: bool = False, direction: Optional[str] = None) -> None:
+    def _add(self, source: Any, handle: int, protocol: str, summary: str, detail: str = "",
+             is_error: bool = False, direction: Optional[str] = None, routine: bool = False) -> None:
         if isinstance(source, L2capFrame):
             index, timestamp, direction = source.index, source.timestamp, direction or source.direction
         else:
             index, timestamp, direction = source["index"], source["timestamp"], direction or source["direction"]
         self.events.append(ProtocolEvent(index, timestamp, direction, handle, self.device(handle),
-                                         protocol, summary, detail, is_error))
+                                         protocol, summary, detail, is_error, routine))
 
     def _event(self, record: Mapping[str, Any]) -> None:
         payload = record["payload"]
@@ -169,6 +172,8 @@ class ProtocolTrace:
             self._avdtp(frame)
         elif protocol == "A2DP Media":
             self._media(frame)
+        elif protocol == "AVCTP":
+            self._avrcp(frame)
 
     def _closed_identified_channels(self, frame: L2capFrame) -> None:
         """Report the closing of channels that were identified from their contents."""
@@ -252,6 +257,15 @@ class ProtocolTrace:
         elif accepted and sig.signal in (0x08, 0x09, 0x0A):
             self._stop_stream(frame, handle, "")
             self._started.discard(handle)
+
+    def _avrcp(self, frame: L2capFrame) -> None:
+        msg = avrcp.parse(frame.payload, frame.length)
+        if msg is None:
+            return
+        # Snoop logs are recorded on the phone, so what it sent (TX) is the phone's side.
+        summary, detail, is_error = avrcp.describe(msg, from_phone=frame.direction == "TX")
+        self._add(frame, frame.handle, "AVRCP", summary, detail=detail, is_error=is_error,
+                  routine=avrcp.is_routine(msg))
 
     def _media(self, frame: L2capFrame) -> None:
         handle = frame.handle
@@ -355,12 +369,16 @@ def print_trace(trace: ProtocolTrace, color: bool = True) -> None:
             print(f"  {CYAN}{device}{RESET}  port {port:<3} {frames:>6,} data frames  {size / 1024:>8.1f} KB  {use}")
 
     print(f"\n{BOLD} Protocol Timeline ───{RESET}")
-    if not trace.events:
+    events = [e for e in trace.events if not e.routine]
+    hidden = len(trace.events) - len(events)
+    if hidden:
+        print(f"  {DIM}{hidden:,} routine messages hidden (status polls, notification sign-ups, acknowledgements).{RESET}")
+    if not events:
         print("  No decoded protocol activity.")
         return
-    width = max(len(e.summary) for e in trace.events if e.detail) if any(e.detail for e in trace.events) else 0
+    width = max(len(e.summary) for e in events if e.detail) if any(e.detail for e in events) else 0
     width = min(width, 32)
-    for event in trace.events:
+    for event in events:
         t_str = event.timestamp.astimezone().strftime("%H:%M:%S.%f")[:-3]
         arrow = "->" if event.direction == "TX" else "<-"
         c = RED if event.is_error else ""

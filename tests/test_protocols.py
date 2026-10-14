@@ -5,7 +5,7 @@ import datetime
 import struct
 import unittest
 
-from btsnoop_parser import avdtp
+from btsnoop_parser import avdtp, avrcp
 from btsnoop_parser.hfp import HfpSession, looks_like_at, split_lines
 from btsnoop_parser.l2cap import L2capDecoder
 from btsnoop_parser.protocols import ProtocolTrace
@@ -447,6 +447,82 @@ class TestChannelsOpenedBeforeCapture(unittest.TestCase):
         capture.l2cap("RX", 0x0004, bytes(100), keep=12)
         frame = L2capDecoder().feed(capture.records[0])
         self.assertEqual((frame.length, len(frame.payload), frame.truncated), (100, 4, True))
+
+
+
+def _avrcp(label: int, response: bool, ctype: int, opcode: int, rest: bytes = b"") -> bytes:
+    return bytes([(label << 4) | (0x02 if response else 0), 0x11, 0x0E, ctype, 0x48, opcode]) + rest
+
+
+def _vendor(label: int, response: bool, ctype: int, pdu: int, params: bytes = b"") -> bytes:
+    return _avrcp(label, response, ctype, 0x00, b"\x00\x19\x58" + bytes([pdu, 0]) + struct.pack(">H", len(params)) + params)
+
+
+class TestAvrcp(unittest.TestCase):
+    def _describe(self, payload: bytes, from_phone: bool = True, length: int = 0) -> tuple[str, str, bool]:
+        return avrcp.describe(avrcp.parse(payload, length or len(payload)), from_phone)
+
+    def test_buttons(self):
+        self.assertEqual(self._describe(_avrcp(1, False, 0x0, 0x7C, bytes([0x46, 0]))), ("Pause", "Pause pressed", False))
+        self.assertEqual(self._describe(_avrcp(1, False, 0x0, 0x7C, bytes([0xCB, 0])))[1], "Next released")
+        self.assertEqual(self._describe(_avrcp(1, True, 0xA, 0x7C, bytes([0x4C, 0])))[1:], ("Previous pressed: rejected", True))
+
+    def test_volume(self):
+        self.assertEqual(self._describe(_vendor(2, False, 0x0, 0x50, bytes([0x40])))[1], "Sets the volume to 50%")
+        self.assertEqual(self._describe(_vendor(3, True, 0xD, 0x31, bytes([0x0D, 0x7F])), from_phone=False)[1], "Volume changed: 100%")
+
+    def test_notifications(self):
+        self.assertEqual(self._describe(_vendor(4, False, 0x3, 0x31, bytes([0x01, 0, 0, 0, 0])))[1],
+                         "Asks to be told when the play status changes")
+        self.assertEqual(self._describe(_vendor(4, True, 0xF, 0x31, bytes([0x01, 0x01])))[1], "Current play status: playing")
+        self.assertEqual(self._describe(_vendor(4, True, 0xD, 0x31, bytes([0x01, 0x02])))[1], "Play status changed: paused")
+        self.assertEqual(self._describe(_vendor(5, True, 0xD, 0x31, bytes([0x02]) + bytes(8)))[1], "Track changed: new track")
+
+    def test_play_status(self):
+        params = struct.pack(">II", 225_000, 83_000) + bytes([0x01])
+        self.assertEqual(self._describe(_vendor(6, True, 0xC, 0x30, params))[1], "Playing, 1:23 of 3:45")
+
+    def test_track_details(self):
+        title, artist = "Song".encode(), "Band".encode()
+        params = bytes([2]) + struct.pack(">IHH", 1, 106, len(title)) + title + struct.pack(">IHH", 2, 106, len(artist)) + artist
+        self.assertEqual(self._describe(_vendor(7, True, 0xC, 0x20, params))[1], "Title: Song; Artist: Band")
+
+    def test_cut_messages_are_guessed_and_marked(self):
+        cut = _vendor(1, True, 0xD, 0x31, bytes([0x0D, 0x40]))[:6]
+        self.assertEqual(self._describe(cut, from_phone=False, length=15)[1], "Likely volume changed; details cut from the log")
+        self.assertEqual(self._describe(cut, from_phone=True, length=15)[1], "Likely play status changed; details cut from the log")
+        self.assertEqual(self._describe(cut, length=22)[1], "Likely track changed; details cut from the log")
+        button = _avrcp(1, False, 0x0, 0x7C)
+        self.assertEqual(self._describe(button, length=8)[1], "Button pressed or released (which button was not recorded)")
+
+    def test_routine_traffic(self):
+        def routine(payload, length=0):
+            return avrcp.is_routine(avrcp.parse(payload, length or len(payload)))
+        self.assertTrue(routine(_vendor(1, False, 0x3, 0x31, bytes([0x01, 0, 0, 0, 0]))))
+        self.assertTrue(routine(_vendor(1, True, 0xF, 0x31, bytes([0x01, 0x01]))))
+        self.assertTrue(routine(_vendor(1, False, 0x1, 0x30)))
+        self.assertTrue(routine(_avrcp(1, True, 0x9, 0x7C, bytes([0x44, 0]))))
+        self.assertTrue(routine(_avrcp(1, False, 0x0, 0x7C, bytes([0xC4, 0]))))  # release
+        self.assertFalse(routine(_avrcp(1, False, 0x0, 0x7C, bytes([0x44, 0]))))  # press
+        self.assertFalse(routine(_vendor(1, True, 0xD, 0x31, bytes([0x01, 0x02]))))
+        self.assertFalse(routine(_avrcp(1, True, 0xA, 0x7C, bytes([0x44, 0]))))  # rejected
+
+    def test_not_avrcp(self):
+        self.assertIsNone(avrcp.parse(bytes([0x00, 0x11, 0x0C, 0, 0x48, 0]), 6))
+
+
+class TestAvrcpTrace(unittest.TestCase):
+    def test_button_press_in_timeline(self):
+        capture = _Capture()
+        capture.connected()
+        capture.open_channel(psm=0x0017, scid=0x0041, dcid=0x0051)
+        capture.l2cap("RX", 0x0051, _avrcp(1, False, 0x0, 0x7C, bytes([0x4B, 0])))
+        capture.l2cap("TX", 0x0041, _avrcp(1, True, 0x9, 0x7C, bytes([0x4B, 0])))
+        capture.l2cap("RX", 0x0051, _avrcp(2, False, 0x0, 0x7C, bytes([0xCB, 0])))
+        trace = _trace(capture)
+        shown = [(e.summary, e.detail) for e in trace.events if e.protocol == "AVRCP" and not e.routine]
+        self.assertEqual(shown, [("Next", "Next pressed")])
+        self.assertEqual(trace.frame_counts[("11:22:33:44:55:66", "AVCTP")], 3)
 
 
 if __name__ == "__main__":
