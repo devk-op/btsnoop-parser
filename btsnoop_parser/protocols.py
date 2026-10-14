@@ -63,6 +63,9 @@ class DeviceProfiles:
     # (start, end, audio packets in the log, started before the capture)
     streams: list[tuple[datetime.datetime, datetime.datetime, int, bool]] = field(default_factory=list)
     stalls: int = 0
+    a2dp_errors: list[str] = field(default_factory=list)
+    # When each kind of problem was first seen, so summaries can say when it started.
+    first_seen: dict[str, datetime.datetime] = field(default_factory=dict)
     buttons: collections.Counter[str] = field(default_factory=collections.Counter)
     volume_sets: list[tuple[datetime.datetime, int]] = field(default_factory=list)
     volume_reports: list[tuple[datetime.datetime, int]] = field(default_factory=list)
@@ -103,7 +106,7 @@ class DeviceProfiles:
         return any((self.streams, self.buttons, self.volume_sets, self.volume_reports, self.tracks, self.hfp_first,
                     self.voice_links, self.android_auto_start, self.codec, self.le_audio,
                     self.gatt_services, self.gatt_phone_services, self.device_info, self.gatt_updates,
-                    self.gatt_errors, self.syncs))
+                    self.gatt_errors, self.syncs, self.a2dp_errors))
 
 
 # A source keeps sending packets while a stream is started, so a longer silence is a stall.
@@ -352,6 +355,9 @@ class ProtocolTrace:
         summary = sig.name if sig.is_command else f"{sig.name} {avdtp.MESSAGE_TYPES[sig.message_type]}"
         detail, is_error = avdtp.describe(sig)
         self._add(frame, handle, "A2DP", summary, detail=detail, is_error=is_error)
+        if is_error:
+            self.profile(handle).a2dp_errors.append(detail)
+            self.profile(handle).first_seen.setdefault("a2dp", frame.timestamp)
 
         accepted = sig.message_type == 2
         if sig.is_command and sig.signal in (0x03, 0x05):
@@ -389,6 +395,7 @@ class ProtocolTrace:
             self._add(frame, frame.handle, "OBEX", summary, detail=detail, is_error=is_error)
             if is_error:
                 self.profile(frame.handle).sync_failures.append(detail)
+                self.profile(frame.handle).first_seen.setdefault("sync", frame.timestamp)
 
     def _att(self, frame: L2capFrame) -> None:
         msg = self._gatt.feed(frame.handle, frame.direction, frame.payload)
@@ -402,6 +409,7 @@ class ProtocolTrace:
             profile.gatt_phone_services = self._gatt.services(frame.handle, "TX")
         if msg.is_error:
             profile.gatt_errors.append(msg.detail)
+            profile.first_seen.setdefault("gatt", frame.timestamp)
         if msg.value is None:
             return
         uuid, decoded, raw = msg.value
@@ -475,8 +483,10 @@ class ProtocolTrace:
                 set_at, level = profile.volume_sets[-1]
                 if (when - set_at).total_seconds() < 1.5 and abs(level - facts["volume_report"]) > 3:
                     profile.volume_overrides.append((level, facts["volume_report"]))
+                    profile.first_seen.setdefault("volume", when)
         if facts.get("play_status") == "error":
             profile.player_errors += 1
+            profile.first_seen.setdefault("player", when)
         if "track" in facts and (not profile.tracks or profile.tracks[-1][1:] != facts["track"]):
             profile.tracks.append((when, *facts["track"]))
 
@@ -493,6 +503,7 @@ class ProtocolTrace:
             silence = (frame.timestamp - stream.last.timestamp).total_seconds()
             if silence > _STALL_SECONDS:
                 self.profile(handle).stalls += 1
+                self.profile(handle).first_seen.setdefault("stall", frame.timestamp)
                 self._add(frame, handle, "A2DP", "Audio stalled", is_error=True,
                           detail=f"No audio sent for {silence:.1f} s while the stream was started")
         stream.first = stream.first or frame
@@ -672,6 +683,10 @@ def _span(start: datetime.datetime, end: datetime.datetime) -> str:
     return format_duration(start, end)
 
 
+def _first(p: DeviceProfiles, kind: str) -> str:
+    return f", first at {_clock(p.first_seen[kind])}" if kind in p.first_seen else ""
+
+
 def _profile_lines(p: DeviceProfiles) -> list[tuple[str, str, bool]]:
     """(label, text, is_warning) lines describing one device's profiles."""
     lines: list[tuple[str, str, bool]] = []
@@ -691,7 +706,9 @@ def _profile_lines(p: DeviceProfiles) -> list[tuple[str, str, bool]]:
         if len(p.streams) > 8:
             lines.append(("", f"... {len(p.streams) - 8} more", False))
         if p.stalls:
-            lines.append(("", f"Audio stalled {p.stalls} time(s) while playing", True))
+            lines.append(("", f"Audio stalled {p.stalls} time(s) while playing{_first(p, 'stall')}", True))
+    for error in dict.fromkeys(p.a2dp_errors):
+        lines.append(("Music (A2DP)" if not (p.streams or p.codec) else "", f"A2DP: {error}{_first(p, 'a2dp')}", True))
 
     if p.buttons or p.volume_sets or p.volume_reports or p.player_errors:
         if p.buttons:
@@ -706,10 +723,11 @@ def _profile_lines(p: DeviceProfiles) -> list[tuple[str, str, bool]]:
             lines.append(("" if p.buttons else "Controls (AVRCP)", "Volume: " + "; ".join(volume), False))
         if p.volume_overrides:
             example = p.volume_overrides[-1]
-            lines.append(("", f"Device overrode the phone's volume {len(p.volume_overrides)} time(s) "
+            lines.append(("", f"Device overrode the phone's volume {len(p.volume_overrides)} time(s){_first(p, 'volume')} "
                               f"(e.g. phone set {example[0]}%, device answered {example[1]}%)", True))
         if p.player_errors:
-            lines.append(("", f"Music app reported a playback error {p.player_errors} time(s)", True))
+            lines.append(("", f"Music app reported a playback error {p.player_errors} time(s){_first(p, 'player')}",
+                          True))
 
     if p.tracks:
         for i, (when, title, artist) in enumerate(p.tracks[:15]):
@@ -756,7 +774,8 @@ def _profile_lines(p: DeviceProfiles) -> list[tuple[str, str, bool]]:
         top = ", ".join(f"{name} x{count:,}" for name, count in p.gatt_updates.most_common(4))
         lines.append(("GATT updates", top, False))
     if p.gatt_errors:
-        lines.append(("", f"{len(p.gatt_errors)} GATT request(s) failed (e.g. {p.gatt_errors[0]})", True))
+        lines.append(("", f"{len(p.gatt_errors)} GATT request(s) failed{_first(p, 'gatt')} (e.g. {p.gatt_errors[0]})",
+                      True))
 
     if p.le_audio or p.le_audio_codec:
         closed = [(s, e) for s, e in p.le_audio if e is not None]
@@ -781,7 +800,9 @@ def _profile_lines(p: DeviceProfiles) -> list[tuple[str, str, bool]]:
     for service, transfers in p.syncs.items():
         shown = [t for t in transfers if t.requests]
         for i, transfer in enumerate(shown or transfers[:1]):
-            lines.append((service if i == 0 else "", obex.describe_transfer(transfer), bool(transfer.failures)))
+            failed = bool(transfer.failures)
+            text = obex.describe_transfer(transfer) + (_first(p, "sync") if failed else "")
+            lines.append((service if i == 0 else "", text, failed))
         if not transfers:
             lines.append((service, "connected, nothing transferred", False))
 

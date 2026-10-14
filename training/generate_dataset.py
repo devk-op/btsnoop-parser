@@ -38,7 +38,9 @@ from btsnoop_parser.analysis import CaptureStats
 from btsnoop_parser.constants import HCI_ERROR_CODES, HCI_OPCODE_NAMES
 from btsnoop_parser.core import HCI_PACKET_TYPES
 from btsnoop_parser.llm import DEFAULT_QUESTION, build_context
+from btsnoop_parser.report import ReportBuilder
 from training.templates import answer_templates as tmpl
+from training.templates import profile_answers
 
 UTC = datetime.timezone.utc
 
@@ -46,7 +48,7 @@ UTC = datetime.timezone.utc
 HOLDOUT_CODES = {0x09, 0x0D, 0x0F, 0x1A, 0x22, 0x2A, 0x3B}
 
 # Longer sessions are regenerated so every example fits train_lora.py's --max-len.
-MAX_INPUT_CHARS = 3000
+MAX_INPUT_CHARS = 3600
 
 CONNECT_FAIL_CODES = [0x02, 0x04, 0x05, 0x06, 0x08, 0x09, 0x0D, 0x0E, 0x10, 0x11, 0x1A, 0x1F, 0x22, 0x28, 0x2F, 0x3A, 0x3B, 0x3E]
 DISCONNECT_CODES = [0x03, 0x05, 0x06, 0x08, 0x09, 0x0D, 0x0E, 0x1A, 0x1F, 0x22, 0x28, 0x3B, 0x3D]
@@ -94,14 +96,17 @@ class Session:
         self._handles.add(handle)
         return handle
 
-    def _add(self, ptype: int, payload: bytes, gap: float) -> datetime.datetime:
+    def _add(self, ptype: int, payload: bytes, gap: float, direction: str | None = None) -> datetime.datetime:
         self.t += datetime.timedelta(seconds=gap)
         self.records.append({
+            "index": len(self.records) + 1,
             "packet_type": ptype,
             "packet_type_name": HCI_PACKET_TYPES[ptype],
+            "direction": direction or ("TX" if ptype in (0x01, 0x02) else "RX"),
             "payload": payload,
             "timestamp": self.t,
             "original_length": len(payload) + 1,
+            "captured_length": len(payload) + 1,
         })
         return self.t
 
@@ -329,33 +334,88 @@ def scenario_audio_fail(s: Session, devices: list[str], codes: list[int]):
     return answer, [mac, name], code
 
 
-# (scenario, status codes it draws from, train count, holdout count)
+# (connection-level scenario, status codes it draws from, train count, holdout count)
 PLAN = [
-    (scenario_normal, [], 260, 25),
-    (scenario_le_fail, CONNECT_FAIL_CODES, 200, 20),
-    (scenario_classic_fail, CONNECT_FAIL_CODES, 150, 15),
-    (scenario_abnormal_disconnect, DISCONNECT_CODES, 200, 20),
-    (scenario_command_fail, COMMAND_FAIL_CODES, 220, 20),
-    (scenario_hardware_error, [], 90, 12),
-    (scenario_audio_fail, CIS_FAIL_CODES, 70, 10),
+    (scenario_normal, [], 180, 20),
+    (scenario_le_fail, CONNECT_FAIL_CODES, 130, 15),
+    (scenario_classic_fail, CONNECT_FAIL_CODES, 100, 15),
+    (scenario_abnormal_disconnect, DISCONNECT_CODES, 130, 15),
+    (scenario_command_fail, COMMAND_FAIL_CODES, 150, 15),
+    (scenario_hardware_error, [], 60, 10),
+    (scenario_audio_fail, CIS_FAIL_CODES, 50, 10),
 ]
 
 
-def _example(stats: CaptureStats, answer: str, facts: list[str], kind: str) -> dict:
-    context = build_context(stats)
-    return {"input": f"{context}\n\nQuestion: {DEFAULT_QUESTION}", "output": answer, "facts": facts, "kind": kind}
+def _example(context: str, answer: str, facts: list[str], kind: str, legacy: bool = False) -> dict:
+    example = {"input": f"{context}\n\nQuestion: {DEFAULT_QUESTION}", "output": answer, "facts": facts, "kind": kind}
+    if legacy:
+        example["system"] = "legacy"  # older btsnoop-parser: old system prompt, no Device Activity section
+    return example
 
 
-def _run(fn, rng, devices, codes, opcodes):
+def _report(records):
+    builder = ReportBuilder()
+    for record in records:
+        builder.analyze_record(record)
+    return builder.stats, builder.build()
+
+
+def _run(fn, rng, devices, codes, opcodes, legacy: bool = False) -> dict:
     s = Session(rng)
     if fn is scenario_command_fail:
         answer, facts, code = fn(s, devices, codes, opcodes)
     else:
         answer, facts, code = fn(s, devices, codes)
-    stats = CaptureStats()
-    for record in s.records:
-        stats.analyze_record(record)
-    return stats, answer, facts
+    stats, report = _report(s.records)
+    context = build_context(stats) if legacy else build_context(stats, report=report)
+    return _example(context, answer, facts, fn.__name__.removeprefix("scenario_"), legacy)
+
+
+# Choices each protocol-level problem draws from; the holdout set uses the others.
+PROFILE_CHOICES = {
+    "a2dp_reject": ("a2dp_reject", [0xC2, 0xC3, 0xC6, 0x29, 0x31], [0xD4, 0x13]),
+    "le_audio_fail": ("le_failure", [(0, 0x06, 0x00), (1, 0x07, 0x06), (1, 0x0D, 0x00), (2, 0x0B, 0x00)],
+                [(1, 0x08, 0x08), (0, 0x09, 0x02)]),
+    "sync_fail": ("sync_fail", [0xC3], [0xC1]),
+    "aa_fail": ("aa_status", [-1, -2, -3, -5], [-10, -11]),
+}
+
+# (protocol-level scenario, train count, holdout count)
+PROFILE_PLAN = [
+    ("car_normal", 80, 12), ("headset_normal", 60, 10), ("le_normal", 50, 8), ("volume_override", 60, 10),
+    ("player_error", 55, 10), ("no_service", 55, 10), ("stall", 55, 10), ("a2dp_reject", 55, 10),
+    ("le_audio_fail", 55, 10), ("aa_fail", 45, 8), ("lost_pairing", 45, 8), ("sync_fail", 45, 8),
+]
+
+
+def _run_profile(kind: str, rng, devices, holdout: bool) -> dict:
+    choices = {}
+    if kind in PROFILE_CHOICES:
+        key, train_values, held_values = PROFILE_CHOICES[kind]
+        choices[key] = rng.choice(held_values if holdout else train_values)
+    from training.profile_scenarios import build_profile_session  # imports this module's Session
+
+    mac = rng.choice(devices)
+    session = build_profile_session(rng, mac, kind, **choices)
+    stats, report = _report(session.records)
+    routine = [label for label in ("the vendor-specific command probe", "Delete Stored Link Key", "Sniff Subrating")
+               if any(i["level"] == "INFO" and _routine_matches(label, i["detail"]) for i in stats.issues)]
+    context = build_context(stats, report=report)
+    problems = "WARNING" in context or any(i["level"] != "INFO" for i in stats.issues)
+    if kind.endswith("_normal"):
+        if problems:
+            return {"input": "x" * (MAX_INPUT_CHARS + 1)}  # rejected by keep(): a "normal" session must be clean
+        answer, facts = profile_answers.normal_answer(report, routine), ["NORMAL"]
+    else:
+        answer, facts = profile_answers.problem_answer(report, stats, mac, kind, routine)
+        if not problems or len(facts) < 2:
+            return {"input": "x" * (MAX_INPUT_CHARS + 1)}  # the problem must be visible in the model's input
+    return _example(context, answer, facts, kind)
+
+
+def _routine_matches(label: str, detail: str) -> bool:
+    return {"the vendor-specific command probe": "Vendor-specific", "Delete Stored Link Key": "Delete Stored",
+            "Sniff Subrating": "Sniff Subrating"}[label] in detail
 
 
 def main() -> None:
@@ -367,21 +427,30 @@ def main() -> None:
     train_opcodes = [op for op in opcodes if op not in holdout_opcodes]
 
     train, holdout = [], []
+
+    def keep(split: list, make, count: int) -> None:
+        made = 0
+        while made < count:
+            example = make()
+            if len(example["input"]) <= MAX_INPUT_CHARS:
+                split.append(example)
+                made += 1
+
     for fn, codes, n_train, n_holdout in PLAN:
-        kind = fn.__name__.removeprefix("scenario_")
         train_codes = [c for c in codes if c not in HOLDOUT_CODES] or codes
         held_codes = [c for c in codes if c in HOLDOUT_CODES] or codes
         for split, count, split_devices, split_codes, split_opcodes in (
             (train, n_train, train_devices, train_codes, train_opcodes),
             (holdout, n_holdout, holdout_devices, held_codes, holdout_opcodes),
         ):
-            made = 0
-            while made < count:
-                stats, answer, facts = _run(fn, rng, split_devices, split_codes, split_opcodes)
-                example = _example(stats, answer, facts, kind)
-                if len(example["input"]) <= MAX_INPUT_CHARS:
-                    split.append(example)
-                    made += 1
+            # Most examples in the current format; a fifth in the older one, so older installs keep working.
+            legacy = count // 5
+            keep(split, lambda: _run(fn, rng, split_devices, split_codes, split_opcodes), count - legacy)
+            keep(split, lambda: _run(fn, rng, split_devices, split_codes, split_opcodes, legacy=True), legacy)
+
+    for kind, n_train, n_holdout in PROFILE_PLAN:
+        keep(train, lambda: _run_profile(kind, rng, train_devices, holdout=False), n_train)
+        keep(holdout, lambda: _run_profile(kind, rng, holdout_devices, holdout=True), n_holdout)
 
     rng.shuffle(train)
     n_val = len(train) // 20

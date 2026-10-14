@@ -104,6 +104,18 @@ class TestReport(unittest.TestCase):
         self.assertEqual([(d.address, d.transports) for d in devices],
                          [("handle 0x00B", ["connected before the capture began"])])
 
+    def test_model_input_has_device_activity(self):
+        from btsnoop_parser.llm import build_context
+        from btsnoop_parser.report import ReportBuilder
+        builder = ReportBuilder()
+        for record in _session().records:
+            builder.analyze_record(record)
+        context = build_context(builder.stats, report=builder.build())
+        self.assertIn("Device Activity:", context)
+        self.assertIn('11:22:33:44:55:66 "MyCar" (car audio)', context)
+        self.assertIn("Security: paired (new pairing)", context)
+        self.assertNotIn("Device Activity:", build_context(builder.stats))
+
     def test_class_of_device(self):
         self.assertEqual(class_of_device(0x240420), "car audio")
         self.assertEqual(class_of_device(0x240404), "wearable headset")

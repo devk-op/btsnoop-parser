@@ -179,7 +179,12 @@ def main() -> None:
         return
 
     if args.ai:
-        stats = _build_capture_stats(records)
+        from .report import ReportBuilder
+        builder = ReportBuilder(show_personal=args.show_personal)
+        for record in records:
+            builder.analyze_record(record)
+        report = builder.build()
+        stats = builder.stats
         from .llm import (
             DEFAULT_ADAPTER,
             DEFAULT_BASE_MODEL,
@@ -198,6 +203,7 @@ def main() -> None:
                 question=args.question or DEFAULT_QUESTION,
                 base_model=base_model,
                 adapter_path=adapter_path,
+                report=report,
             )
         except ModelUnavailableError as exc:
             print(f"Error: {exc}", file=sys.stderr)

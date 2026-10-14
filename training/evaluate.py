@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from btsnoop_parser.llm import SYSTEM_PROMPT
+from training.templates.legacy_prompt import LEGACY_SYSTEM_PROMPT
 
 DATA_PATH = ROOT / "training" / "data" / "eval_holdout.jsonl"
 RESULTS_DIR = ROOT / "training" / "checkpoints" / "eval"
@@ -46,7 +47,7 @@ def main() -> None:
     parser.add_argument("--model", required=True, help="Base model id or local folder")
     parser.add_argument("--adapter", help="LoRA adapter folder")
     parser.add_argument("--limit", type=int, help="Only score the first N holdout examples")
-    parser.add_argument("--max-new-tokens", type=int, default=250)
+    parser.add_argument("--max-new-tokens", type=int, default=400)
     args = parser.parse_args()
 
     import torch
@@ -70,7 +71,8 @@ def main() -> None:
     rows = []
     started = time.time()
     for i, ex in enumerate(examples, 1):
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": ex["input"]}]
+        system = LEGACY_SYSTEM_PROMPT if ex.get("system") == "legacy" else SYSTEM_PROMPT
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": ex["input"]}]
         inputs = tokenizer.apply_chat_template(
             messages, add_generation_prompt=True, return_dict=True, return_tensors="pt"
         ).to(device)
@@ -79,7 +81,7 @@ def main() -> None:
                                  pad_token_id=tokenizer.eos_token_id)
         answer = tokenizer.decode(out[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True).strip()
         ok = _correct(answer, ex["facts"])
-        by_kind[ex["kind"]].append(ok)
+        by_kind[ex["kind"] + (" (older input)" if ex.get("system") == "legacy" else "")].append(ok)
         rows.append({"kind": ex["kind"], "facts": ex["facts"], "correct": ok, "answer": answer, "expected": ex["output"]})
         if i % 10 == 0:
             print(f"  {i}/{len(examples)} done ({time.time() - started:.0f}s)")

@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from btsnoop_parser.llm import SYSTEM_PROMPT
+from training.templates.legacy_prompt import LEGACY_SYSTEM_PROMPT
 
 DATA_DIR = ROOT / "training" / "data"
 
@@ -41,7 +42,7 @@ def main() -> None:
     parser.add_argument("--output", help="Adapter output folder (default: training/checkpoints/<model>-lora)")
     parser.add_argument("--epochs", type=float, default=2)
     parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--max-len", type=int, default=1920)
+    parser.add_argument("--max-len", type=int, default=2176)
     parser.add_argument("--bf16", action="store_true", help="Train in bfloat16 (faster; fall back to fp32 if loss is NaN)")
     args = parser.parse_args()
 
@@ -60,8 +61,9 @@ def main() -> None:
         tokenizer.pad_token = tokenizer.eos_token
 
     def encode(example: dict) -> dict:
+        system = LEGACY_SYSTEM_PROMPT if example.get("system") == "legacy" else SYSTEM_PROMPT
         prompt = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user", "content": example["input"]},
         ]
         prompt_text = tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
@@ -86,7 +88,9 @@ def main() -> None:
         return {"input_ids": padded("input_ids", pad), "attention_mask": padded("attention_mask", 0),
                 "labels": padded("labels", -100)}
 
-    columns = ["input", "output", "facts", "kind"]
+    columns = ["input", "output", "facts", "kind", "system"]
+    for example in train_examples + val_examples:
+        example.setdefault("system", "")
     train_ds = Dataset.from_list(train_examples).map(encode, remove_columns=columns)
     val_ds = Dataset.from_list(val_examples).map(encode, remove_columns=columns)
     lengths = [len(x) for x in train_ds["input_ids"]]

@@ -559,3 +559,59 @@ def print_report(report: SessionReport, color: bool = True) -> None:
         print(f"  {colour}[{issue['level']}] {_clock(issue['timestamp'])} {issue['title']}: {issue['detail']}{RESET}")
     if notes:
         print(f"  {DIM}{len(notes)} routine failure(s) not counted as problems (see --stats){RESET}")
+
+
+def activity_lines(report: SessionReport) -> list[str]:
+    """A condensed, plain-text "Device Activity" section for the --ai model.
+
+    Problems are prefixed with WARNING; times of individual streams and song
+    titles are left out to keep the model's input short.
+    """
+    lines = ["Device Activity:"]
+    seen = {"music": False, "calls": False, "controls": False, "Android Auto": False}
+    for device in report.devices:
+        name = f' "{device.name}"' if device.name else ""
+        lines.append(f"  {device.address}{name} ({device.kind or 'unknown type'})")
+        connections = [c for c in report.connections if c.device == device.address]
+        if connections:
+            last = connections[-1]
+            ending = (f"; last ended by the {last.ended_by} ({last.end_reason})" if last.ended_by
+                      else f"; last ended: {last.end_reason}" if last.end_reason else "; still connected at the end")
+            lines.append(f"    Connections: {len(connections)}{ending}")
+        security = list(dict.fromkeys(note for c in connections for note in c.security))
+        for note in security:
+            problem = not note.startswith(("paired", "pairing started"))
+            lines.append(f"    {'WARNING: ' if problem else 'Security: '}{note}")
+        profile = report.profiles.get(device.address)
+        if profile is None or not profile.active():
+            continue
+        label = ""
+        sync_parts: dict[str, list[str]] = {}
+        for text_label, text, warning in _profile_lines(profile):
+            if text_label:
+                label = text_label
+            if label == "Songs":
+                continue
+            if label in profile.syncs and not warning:
+                # One line per sync service, keeping only what actually came back.
+                if not text.endswith("requested") and "nothing transferred" not in text:
+                    sync_parts.setdefault(label, []).append(text.split(", over")[0])
+                continue
+            if not text_label and text[:2].isdigit() and text[2:3] == ":":
+                continue  # a single stream's start and end time
+            prefix = "WARNING: " if warning else (f"{label}: " if text_label else "")
+            lines.append(f"    {prefix}{text}")
+        for service, parts in sync_parts.items():
+            lines.append(f"    {service}: {'; '.join(parts)}")
+        if profile.tracks:
+            lines.append(f"    Songs: {len(profile.tracks)} played")
+        seen["music"] |= bool(profile.streams or profile.codec or profile.le_audio)
+        seen["calls"] |= bool(profile.hfp_first)
+        seen["controls"] |= bool(profile.buttons or profile.volume_sets or profile.volume_reports)
+        seen["Android Auto"] |= bool(profile.android_auto_start or profile.android_auto_wifi)
+    if not report.devices:
+        lines.append("  No device activity recorded.")
+    missing = [name for name, found in seen.items() if not found]
+    if missing:
+        lines.append(f"  Not seen: {', '.join(missing)}")
+    return lines
