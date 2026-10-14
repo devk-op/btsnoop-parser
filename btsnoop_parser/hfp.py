@@ -116,6 +116,22 @@ class HfpSession:
         # A bare text line answers a query such as AT+CGMI (manufacturer) or AT+CGMM (model).
         return "Information reply", False
 
+    def updates(self, line: str) -> dict[str, int]:
+        """Indicator values a result line sets, by name (from +CIEV or a +CIND value list)."""
+        result = _RESULT.match(line.strip())
+        if not result or not self._indicators:
+            return {}
+        name, value = result.group(1).upper().lstrip("+"), result.group(2)
+        if name == "CIEV":
+            index, _, val = value.partition(",")
+            position = int(index) - 1 if index.strip().isdigit() else -1
+            if 0 <= position < len(self._indicators) and val.strip().isdigit():
+                return {self._indicators[position]: int(val)}
+        elif name == "CIND" and "(" not in value:
+            values = [v.strip() for v in value.split(",")]
+            return {n: int(v) for n, v in zip(self._indicators, values) if v.isdigit()}
+        return {}
+
     def _indicator(self, index: str, value: str) -> str:
         position = int(index) - 1 if index.isdigit() else -1
         if not 0 <= position < len(self._indicators):

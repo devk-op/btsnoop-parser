@@ -55,6 +55,40 @@ class _Stream:
     gaps: list[float] = field(default_factory=list)
 
 
+@dataclass
+class DeviceProfiles:
+    """What each profile did with one remote device, for the --stats summary."""
+
+    codec: Optional[str] = None
+    # (start, end, audio packets in the log, started before the capture)
+    streams: list[tuple[datetime.datetime, datetime.datetime, int, bool]] = field(default_factory=list)
+    stalls: int = 0
+    buttons: collections.Counter[str] = field(default_factory=collections.Counter)
+    volume_sets: list[tuple[datetime.datetime, int]] = field(default_factory=list)
+    volume_reports: list[tuple[datetime.datetime, int]] = field(default_factory=list)
+    volume_overrides: list[tuple[int, int]] = field(default_factory=list)  # (phone set, device reported)
+    player_errors: int = 0
+    tracks: list[tuple[datetime.datetime, str, str]] = field(default_factory=list)
+    hfp_first: Optional[datetime.datetime] = None
+    hfp_last: Optional[datetime.datetime] = None
+    hfp_connections: int = 0
+    hfp_codecs: str = ""
+    calls: int = 0
+    incoming: int = 0
+    outgoing: int = 0
+    no_service: bool = False
+    hfp_errors: int = 0
+    voice_links: list[tuple[datetime.datetime, Optional[datetime.datetime], str]] = field(default_factory=list)
+    # LE Audio streams: (start, end or None while open)
+    le_audio: list[tuple[datetime.datetime, Optional[datetime.datetime]]] = field(default_factory=list)
+    android_auto_start: Optional[datetime.datetime] = None
+    android_auto_wifi: Optional[tuple[datetime.datetime, bool]] = None
+
+    def active(self) -> bool:
+        return any((self.streams, self.buttons, self.volume_sets, self.volume_reports, self.tracks, self.hfp_first,
+                    self.voice_links, self.android_auto_start, self.codec, self.le_audio))
+
+
 # A source keeps sending packets while a stream is started, so a longer silence is a stall.
 _STALL_SECONDS = 2.0
 # How long an unconfirmed AVDTP command waits for its answer.
@@ -89,6 +123,10 @@ class ProtocolTrace:
         self._at_buffers: dict[tuple[int, int, str], str] = {}
         self.data_frames = 0
         self.truncated_frames = 0
+        self.profiles: dict[str, DeviceProfiles] = {}
+        self._last_timestamp: Optional[datetime.datetime] = None
+        self._cis_owner: dict[int, int] = {}  # LE Audio stream handle -> connection handle
+        self._open_cis: set[int] = set()
         # (handle, direction, cid) -> protocol, for channels identified from their contents
         self._labels: dict[tuple[int, str, int], str] = {}
         self._candidates: list[tuple[L2capFrame, avdtp.AvdtpSignal]] = []
@@ -102,8 +140,18 @@ class ProtocolTrace:
     def device(self, handle: int) -> str:
         return self._devices.get(handle, f"handle 0x{handle:03X}")
 
+    def profile(self, handle: int) -> DeviceProfiles:
+        return self.profiles.setdefault(self.device(handle), DeviceProfiles())
+
     def analyze_record(self, record: Mapping[str, Any]) -> None:
         """Ingest a single record."""
+        self._last_timestamp = record["timestamp"]
+        payload = record["payload"]
+        # LE Create CIS: [OpcodeLSB, OpcodeMSB, Len, Count, then CISHandle(2) + ACLHandle(2) per stream]
+        if record["packet_type"] == 0x01 and len(payload) >= 4 and payload[0] | (payload[1] << 8) == 0x2064:
+            for offset in range(4, min(len(payload), 4 + 4 * payload[3]) - 3, 4):
+                cis = (payload[offset] | (payload[offset + 1] << 8)) & 0x0FFF
+                self._cis_owner[cis] = (payload[offset + 2] | (payload[offset + 3] << 8)) & 0x0FFF
         if record["packet_type"] == 0x04:
             self._event(record)
         elif record["packet_type"] == 0x02:
@@ -131,6 +179,15 @@ class ProtocolTrace:
             self._devices[handle] = _addr(payload[5:11])
             self._add(record, handle, "HCI", "Connected", detail="Classic (BR/EDR) link")
 
+        elif code == 0x3E and len(payload) >= 6 and payload[2] == 0x19 and payload[3] == 0x00:  # LE CIS Established
+            cis = payload[4] | (payload[5] << 8)
+            if cis in self._cis_owner:
+                self._open_cis.add(cis)
+                self.profile(self._cis_owner[cis]).le_audio.append((record["timestamp"], None))
+
+        elif code == 0x3E and len(payload) >= 7 and payload[2] == 0x1A:  # LE CIS Request: ACL handle, CIS handle
+            self._cis_owner[payload[5] | (payload[6] << 8)] = payload[3] | (payload[4] << 8)
+
         elif code == 0x3E and len(payload) >= 14 and payload[2] in (0x01, 0x0A, 0x29) and payload[3] == 0x00:
             handle = payload[4] | (payload[5] << 8)
             self._devices[handle] = _addr(payload[8:14])
@@ -144,6 +201,7 @@ class ProtocolTrace:
                 self._voice_handles.add(handle)
                 codec = _AIR_MODES.get(payload[18], f"air mode 0x{payload[18]:02X}")
                 self._add(record, handle, "Voice", f"Voice link opened ({link}, {codec})")
+                self.profile(handle).voice_links.append((record["timestamp"], None, codec))
             else:
                 reason = HCI_ERROR_CODES.get(status, f"0x{status:02X}")
                 self._devices.setdefault(handle, _addr(payload[5:11]))
@@ -152,9 +210,18 @@ class ProtocolTrace:
         elif code == 0x05 and len(payload) >= 6 and payload[2] == 0x00:  # Disconnection Complete
             handle = payload[3] | (payload[4] << 8)
             reason = HCI_ERROR_CODES.get(payload[5], f"0x{payload[5]:02X}")
+            if handle in self._open_cis:
+                self._open_cis.discard(handle)
+                streams = self.profile(self._cis_owner[handle]).le_audio
+                if streams and streams[-1][1] is None:
+                    streams[-1] = (streams[-1][0], record["timestamp"])
+                return
             if handle in self._voice_handles:
                 self._voice_handles.discard(handle)
                 self._add(record, handle, "Voice", f"Voice link closed ({reason})")
+                links = self.profile(handle).voice_links
+                if links and links[-1][1] is None:
+                    links[-1] = (links[-1][0], record["timestamp"], links[-1][2])
             else:
                 self._stop_stream(record, handle, "")
                 self._add(record, handle, "HCI", "Disconnected", detail=reason)
@@ -260,10 +327,12 @@ class ProtocolTrace:
                 self._pending_codecs[(handle, sig.label)] = codecs[0]
         elif accepted and sig.signal in (0x03, 0x05) and (handle, sig.label) in self._pending_codecs:
             self._codecs[handle] = self._pending_codecs.pop((handle, sig.label))
+            self.profile(handle).codec = self._codecs[handle]
         elif accepted and sig.signal == 0x04:
             codecs, _ = avdtp._capabilities(sig.body)
             if codecs:
                 self._codecs[handle] = codecs[0]
+                self.profile(handle).codec = codecs[0]
         elif accepted and sig.signal == 0x07:
             self._started.add(handle)
             self._streams[handle] = _Stream(started=frame)
@@ -277,8 +346,27 @@ class ProtocolTrace:
             return
         # Snoop logs are recorded on the phone, so what it sent (TX) is the phone's side.
         summary, detail, is_error = avrcp.describe(msg, from_phone=frame.direction == "TX")
+        self._avrcp_facts(frame, avrcp.facts(msg))
         self._add(frame, frame.handle, "AVRCP", summary, detail=detail, is_error=is_error,
                   routine=avrcp.is_routine(msg))
+
+    def _avrcp_facts(self, frame: L2capFrame, facts: dict) -> None:
+        profile, when = self.profile(frame.handle), frame.timestamp
+        if "button" in facts:
+            profile.buttons[facts["button"]] += 1
+        if "volume_set" in facts and frame.direction == "TX":
+            profile.volume_sets.append((when, facts["volume_set"]))
+        if "volume_report" in facts and frame.direction == "RX":
+            profile.volume_reports.append((when, facts["volume_report"]))
+            # A device that answers the phone's new volume with a different one is overriding it.
+            if profile.volume_sets:
+                set_at, level = profile.volume_sets[-1]
+                if (when - set_at).total_seconds() < 1.5 and abs(level - facts["volume_report"]) > 3:
+                    profile.volume_overrides.append((level, facts["volume_report"]))
+        if facts.get("play_status") == "error":
+            profile.player_errors += 1
+        if "track" in facts and (not profile.tracks or profile.tracks[-1][1:] != facts["track"]):
+            profile.tracks.append((when, *facts["track"]))
 
     def _media(self, frame: L2capFrame) -> None:
         handle = frame.handle
@@ -292,6 +380,7 @@ class ProtocolTrace:
         if stream.last is not None:
             silence = (frame.timestamp - stream.last.timestamp).total_seconds()
             if silence > _STALL_SECONDS:
+                self.profile(handle).stalls += 1
                 self._add(frame, handle, "A2DP", "Audio stalled", is_error=True,
                           detail=f"No audio sent for {silence:.1f} s while the stream was started")
         stream.first = stream.first or frame
@@ -305,11 +394,14 @@ class ProtocolTrace:
             return
         if stream.first is None:
             if stream.started is not None:
+                self.profile(handle).streams.append((stream.started.timestamp, _timestamp(source), 0, False))
                 seconds = (_timestamp(source) - stream.started.timestamp).total_seconds()
                 self._add(source, handle, "A2DP", "Stream summary", direction=stream.started.direction,
                           detail=f"Streamed for {seconds:.1f} s, but no audio packets are in the log: the phone's "
                                  "Bluetooth chip encoded and sent the audio itself (hardware offload)")
             return
+        start = stream.started.timestamp if stream.started is not None else stream.first.timestamp
+        self.profile(handle).streams.append((start, stream.last.timestamp, stream.packets, stream.started is None))
         seconds = (stream.last.timestamp - stream.first.timestamp).total_seconds()
         rate = f", about {stream.size * 8 / seconds / 1000:.0f} kbit/s" if seconds > 0 else ""
         codec = f" {self._codecs[handle]}" if handle in self._codecs else ""
@@ -324,6 +416,10 @@ class ProtocolTrace:
         for handle, stream in list(self._streams.items()):
             if stream.last is not None:
                 self._stop_stream(stream.last, handle, " (still streaming when the capture ended)")
+            elif stream.started is not None and self._last_timestamp is not None:
+                end = {"index": stream.started.index, "timestamp": self._last_timestamp,
+                       "direction": stream.started.direction}
+                self._stop_stream(end, handle, "")
         self.events.sort(key=lambda e: e.index)
 
     def _rfcomm(self, frame: L2capFrame) -> None:
@@ -355,6 +451,11 @@ class ProtocolTrace:
             self._android_auto_ports.add(key)
         if android_auto.is_message(payload):
             summary, detail, is_error = android_auto.describe(payload)
+            profile, message = self.profile(frame.handle), int.from_bytes(payload[2:4], "big")
+            if message == 1 and profile.android_auto_start is None:
+                profile.android_auto_start = frame.timestamp
+            elif message == 6:
+                profile.android_auto_wifi = (frame.timestamp, not is_error)
             self._add(frame, frame.handle, "AAuto", summary, detail=detail, is_error=is_error)
         return True
 
@@ -368,7 +469,26 @@ class ProtocolTrace:
             return False  # some other profile is using this serial port
         session = self._hfp.setdefault(key, HfpSession())
         lines, self._at_buffers[buffer_key] = split_lines(pending + text)
+        profile = self.profile(frame.handle)
         for line in lines:
+            profile.hfp_first = profile.hfp_first or frame.timestamp
+            profile.hfp_last = frame.timestamp
+            upper = line.strip().upper()
+            if upper.startswith("AT+BRSF"):
+                profile.hfp_connections += 1
+            elif upper.startswith("AT+BAC="):
+                profile.hfp_codecs = session.describe(line)[0].split(": ", 1)[-1]
+            elif upper.startswith(("ATD", "AT+BLDN")):
+                profile.outgoing += 1
+            elif upper.startswith("+CME ERROR"):
+                profile.hfp_errors += 1
+            for name, value in session.updates(line).items():
+                if name == "call" and value == 1:
+                    profile.calls += 1
+                elif name == "callsetup" and value == 1:
+                    profile.incoming += 1
+                elif name == "service":
+                    profile.no_service = value == 0
             summary, is_error = session.describe(line)
             self._add(frame, frame.handle, "HFP", line.strip(), detail=summary, is_error=is_error)
         return True
@@ -418,3 +538,129 @@ def print_trace(trace: ProtocolTrace, color: bool = True) -> None:
         c = RED if event.is_error else ""
         text = f"{event.summary:<{width}}  {DIM}{event.detail}{RESET}" if event.detail else event.summary
         print(f"  {t_str} {arrow} {CYAN}{event.device}{RESET}  {event.protocol:<7} {c}{text}{RESET}")
+
+
+def _clock(ts: datetime.datetime) -> str:
+    return ts.astimezone().strftime("%H:%M:%S")
+
+
+def _span(start: datetime.datetime, end: datetime.datetime) -> str:
+    from .analysis import format_duration
+    return format_duration(start, end)
+
+
+def _profile_lines(p: DeviceProfiles) -> list[tuple[str, str, bool]]:
+    """(label, text, is_warning) lines describing one device's profiles."""
+    lines: list[tuple[str, str, bool]] = []
+
+    if p.streams or p.codec:
+        total = sum(((end - start) for start, end, _, _ in p.streams), datetime.timedelta())
+        offloaded = p.streams and all(packets == 0 for _, _, packets, _ in p.streams)
+        text = p.codec or "codec not captured"
+        if p.streams:
+            text += f"; played {len(p.streams)} time(s), {_span(datetime.datetime.min, datetime.datetime.min + total)} in total"
+        if offloaded:
+            text += " (audio sent by the phone's chip, not in the log)"
+        lines.append(("Music (A2DP)", text, False))
+        for start, end, _, before in p.streams[:8]:
+            note = " (already playing when the capture began)" if before else ""
+            lines.append(("", f"{_clock(start)} - {_clock(end)}  {_span(start, end)}{note}", False))
+        if len(p.streams) > 8:
+            lines.append(("", f"... {len(p.streams) - 8} more", False))
+        if p.stalls:
+            lines.append(("", f"Audio stalled {p.stalls} time(s) while playing", True))
+
+    if p.buttons or p.volume_sets or p.volume_reports or p.player_errors:
+        if p.buttons:
+            pressed = ", ".join(f"{name} x{count}" for name, count in p.buttons.most_common())
+            lines.append(("Controls (AVRCP)", f"Buttons pressed on the device: {pressed}", False))
+        volume = []
+        if p.volume_sets:
+            volume.append(f"phone changed it {len(p.volume_sets)} time(s), last to {p.volume_sets[-1][1]}%")
+        if p.volume_reports:
+            volume.append(f"device reported {len(p.volume_reports)} change(s), last {p.volume_reports[-1][1]}%")
+        if volume:
+            lines.append(("" if p.buttons else "Controls (AVRCP)", "Volume: " + "; ".join(volume), False))
+        if p.volume_overrides:
+            example = p.volume_overrides[-1]
+            lines.append(("", f"Device overrode the phone's volume {len(p.volume_overrides)} time(s) "
+                              f"(e.g. phone set {example[0]}%, device answered {example[1]}%)", True))
+        if p.player_errors:
+            lines.append(("", f"Music app reported a playback error {p.player_errors} time(s)", True))
+
+    if p.tracks:
+        for i, (when, title, artist) in enumerate(p.tracks[:15]):
+            song = f"{title} - {artist}" if artist else title
+            lines.append(("Songs" if i == 0 else "", f"{_clock(when)}  {song}", False))
+        if len(p.tracks) > 15:
+            lines.append(("", f"... {len(p.tracks) - 15} more", False))
+
+    if p.hfp_first:
+        text = f"Active {_clock(p.hfp_first)} - {_clock(p.hfp_last)}"
+        if p.hfp_connections > 1:
+            text += f", connected {p.hfp_connections} times"
+        if p.hfp_codecs:
+            text += f"; voice codecs {p.hfp_codecs}"
+        calls = []
+        if p.incoming:
+            calls.append(f"{p.incoming} incoming")
+        if p.outgoing:
+            calls.append(f"{p.outgoing} outgoing")
+        text += "; calls: " + (", ".join(calls) if calls else ("none" if not p.calls else f"{p.calls} active"))
+        lines.append(("Calls (HFP)", text, False))
+        if p.no_service:
+            lines.append(("", "Phone reported no cellular service, so calls through this device would fail", True))
+        if p.hfp_errors:
+            lines.append(("", f"Phone answered {p.hfp_errors} hands-free request(s) with an error "
+                              "(often unsupported features such as text messages)", False))
+    if p.le_audio:
+        closed = [(s, e) for s, e in p.le_audio if e is not None]
+        total = sum(((e - s) for s, e in closed), datetime.timedelta())
+        lines.append(("LE Audio", f"{len(p.le_audio)} audio stream(s), "
+                                  f"{_span(datetime.datetime.min, datetime.datetime.min + total)} in total", False))
+        for start, end in p.le_audio[:8]:
+            lines.append(("", f"{_clock(start)} - {_clock(end) + '  ' + _span(start, end) if end else 'still open'}", False))
+        if len(p.le_audio) > 8:
+            lines.append(("", f"... {len(p.le_audio) - 8} more", False))
+    for start, end, codec in p.voice_links:
+        length = _span(start, end) if end else "still open at the end of the capture"
+        lines.append(("Voice link", f"{_clock(start)}  {codec}, {length}", False))
+
+    if p.android_auto_start or p.android_auto_wifi:
+        text = f"Started {_clock(p.android_auto_start)}" if p.android_auto_start else "Set-up seen"
+        if p.android_auto_wifi:
+            when, ok = p.android_auto_wifi
+            text += (f"; phone joined the device's Wi-Fi at {_clock(when)}" if ok
+                     else f"; phone failed to join the device's Wi-Fi at {_clock(when)}")
+        lines.append(("Android Auto", text + " (projection then runs over Wi-Fi, not in this log)",
+                      bool(p.android_auto_wifi and not p.android_auto_wifi[1])))
+    return lines
+
+
+def print_profiles(trace: ProtocolTrace, color: bool = True) -> None:
+    """Print what music, controls, calls and Android Auto did with each device."""
+    trace.finish()
+    if color:
+        BOLD, YELLOW, CYAN, DIM, RESET = "\033[1m", "\033[93m", "\033[96m", "\033[2m", "\033[0m"
+    else:
+        BOLD = YELLOW = CYAN = DIM = RESET = ""
+    devices = {device: p for device, p in trace.profiles.items() if p.active()}
+    print(f"\n{BOLD}Profiles:{RESET}")
+    if trace.truncated_frames:
+        print(f"  {DIM}Filtered capture: some details were cut from the log.{RESET}")
+    if not devices:
+        print("  No music, call or remote-control activity found.")
+    seen = {"music (A2DP or LE Audio)": False, "calls (HFP)": False, "remote control (AVRCP)": False,
+            "Android Auto": False}
+    for device, profile in devices.items():
+        print(f"  {CYAN}{device}{RESET}")
+        for label, text, warning in _profile_lines(profile):
+            colour = YELLOW if warning else ""
+            print(f"    {label:<17} {colour}{'! ' if warning else ''}{text}{RESET if warning else ''}")
+        seen["music (A2DP or LE Audio)"] |= bool(profile.streams or profile.codec or profile.le_audio)
+        seen["calls (HFP)"] |= bool(profile.hfp_first)
+        seen["remote control (AVRCP)"] |= bool(profile.buttons or profile.volume_sets or profile.volume_reports)
+        seen["Android Auto"] |= bool(profile.android_auto_start or profile.android_auto_wifi)
+    missing = [name for name, found in seen.items() if not found]
+    if missing:
+        print(f"  {DIM}Not seen in this capture: {', '.join(missing)}{RESET}")

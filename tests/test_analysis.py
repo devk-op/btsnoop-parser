@@ -313,5 +313,19 @@ class TestIssueCodes(unittest.TestCase):
 
 
 
+
+class TestSniffModeRace(unittest.TestCase):
+    def test_exit_sniff_disallowed_is_informational(self):
+        s = CaptureStats()
+        # [Command Status, Len, Status, NumCmds, OpcodeLSB, OpcodeMSB]
+        s.analyze_record(_record(bytes([0x0F, 0x04, 0x0C, 0x01, 0x04, 0x08])))
+        self.assertEqual(s.issues[0]["level"], "INFO")
+        self.assertIn("Exit Sniff Mode", s.issues[0]["detail"])
+
+    def test_exit_sniff_other_failure_is_still_an_error(self):
+        s = CaptureStats()
+        s.analyze_record(_record(bytes([0x0F, 0x04, 0x02, 0x01, 0x04, 0x08])))
+        self.assertEqual(s.issues[0]["level"], "ERROR")
+
 if __name__ == "__main__":
     unittest.main()

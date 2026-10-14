@@ -31,6 +31,14 @@ def _build_capture_stats(records):
     return stats
 
 
+def _build_protocol_trace(records):
+    from .protocols import ProtocolTrace
+    trace = ProtocolTrace()
+    for record in records:
+        trace.analyze_record(record)
+    return trace
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Parse Android btsnoop_hci.log captures.")
     parser.add_argument("file", help="Path to a btsnoop_hci.log file")
@@ -142,14 +150,13 @@ def main() -> None:
     if args.stats:
         stats = _build_capture_stats(records)
         stats.print_summary(color=not args.no_color)
+        from .protocols import print_profiles
+        print_profiles(_build_protocol_trace(records), color=not args.no_color)
         return
 
     if args.protocols:
-        from .protocols import ProtocolTrace, print_trace
-        trace = ProtocolTrace()
-        for record in records:
-            trace.analyze_record(record)
-        print_trace(trace, color=not args.no_color)
+        from .protocols import print_trace
+        print_trace(_build_protocol_trace(records), color=not args.no_color)
         return
 
     if args.ai:

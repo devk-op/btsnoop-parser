@@ -49,8 +49,11 @@ Options
 
 .. option:: --stats
 
-   Analyse the capture and print connection history, detected devices, and
-   potential issues.
+   Analyse the capture and print connection history, detected devices,
+   potential issues, and a profile summary for each device: music (A2DP and
+   LE Audio) with codec and play time, remote-control buttons, songs, volume
+   changes, calls and cellular service, and Android Auto start-up. Profiles
+   with no activity are listed as not seen.
 
 .. option:: --protocols
 

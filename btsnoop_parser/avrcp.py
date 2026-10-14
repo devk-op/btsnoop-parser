@@ -226,3 +226,39 @@ def is_routine(msg: AvrcpMessage) -> bool:
     size = msg.length - _VENDOR_HEADER
     # Cut short: play status polls (empty request, 9-byte answer) and position updates (4 bytes of data).
     return (msg.ctype == 0x1 and size == 0) or (msg.ctype == 0xC and size == 9) or (msg.ctype == 0xD and size == 5)
+
+
+def facts(msg: AvrcpMessage) -> dict:
+    """Structured facts from a fully captured message, for summaries.
+
+    Keys present when they apply: ``button`` (name of a pressed button), ``volume_set``
+    (percent the sender asked for), ``volume_report`` (percent a notification reports),
+    ``play_status``, and ``track`` ((title, artist) from track details).
+    """
+    found: dict = {}
+    if msg.failed:
+        return found
+    if msg.opcode == 0x7C:
+        if msg.is_response:
+            return found
+        if len(msg.payload) < 7:
+            found["button"] = "button (name cut from log; press and release both counted)"
+        elif not msg.payload[6] & 0x80:
+            found["button"] = BUTTONS.get(msg.payload[6] & 0x7F, f"button 0x{msg.payload[6] & 0x7F:02X}")
+        return found
+    if msg.opcode != 0x00 or len(msg.payload) < _VENDOR_HEADER or msg.payload[6:9] != _SIG_COMPANY:
+        return found
+    pdu, params = msg.payload[9], msg.payload[_VENDOR_HEADER:]
+    if pdu == 0x50 and not msg.is_response and params:
+        found["volume_set"] = round((params[0] & 0x7F) * 100 / 127)
+    elif pdu == 0x31 and msg.is_response and msg.ctype == 0xD and len(params) >= 2:
+        if params[0] == 0x0D:
+            found["volume_report"] = round((params[1] & 0x7F) * 100 / 127)
+        elif params[0] == 0x01:
+            found["play_status"] = PLAY_STATUS.get(params[1], f"0x{params[1]:02X}")
+    elif pdu == 0x20 and msg.is_response:
+        details = dict(part.split(": ", 1) for part in _track_details(params).split("; ") if ": " in part)
+        title = details.get("Title", "")
+        if title and title.lower() not in ("not provided", "unknown"):
+            found["track"] = (title, details.get("Artist", ""))
+    return found

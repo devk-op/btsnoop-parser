@@ -55,7 +55,7 @@ so treat `--ai` as a plain-English starting point and check it against `--stats`
 - Wireshark-style CLI table with direction colouring.
 - **`--filter`** — filter by packet type and direction before processing.
 - **`--pcap`** — export to PCAP (link type 201) for Wireshark / tshark.
-- **`--stats`** — connection history, device list, and issue detection.
+- **`--stats`** — connection history, device list, issue detection, and a per-device profile summary: music played and for how long, codec, buttons pressed, songs, volume changes (including a device overriding the phone), calls and cellular service, LE Audio streams, Android Auto start-up.
 - **`--protocols`** — timeline of what the devices said above HCI: L2CAP channels, A2DP streaming (codec, start, pause, stalls), AVRCP buttons, volume and track changes, wireless Android Auto start-up, RFCOMM serial ports, HFP commands in plain English, voice links. Works on filtered Android logs too.
 - **`--ai`** — a small local model, fine-tuned on HCI sessions, says in plain English whether anything failed and why (runs offline, optional extra).
 - **`--link-keys`** — extract Classic BT link keys seen in HCI traffic (for use with your own authorized captures).

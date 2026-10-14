@@ -16,14 +16,18 @@ _BENIGN_FAILURE_OPCODES = {
     0x0C12,  # Delete Stored Link Key: Android keeps keys host-side, controller often has none
     0x0811,  # Sniff Subrating: power-saving tuning, rejected params only cost battery
 }
+# Entering or leaving sniff (power-saving) mode is refused with Command Disallowed when the link
+# is already changing mode; the link settles on its own, so this is not a fault.
+_BENIGN_FAILURES = {(0x0803, 0x0C), (0x0804, 0x0C)}
 
 
-def _command_failure(opcode: int) -> tuple[str, str]:
+def _command_failure(opcode: int, status: int) -> tuple[str, str]:
     """Return (level, human-readable command name) for a failed command."""
     if opcode >> 10 == _VENDOR_SPECIFIC_OGF:
         return "INFO", f"Vendor-specific command 0x{opcode:04X}"
     name = HCI_OPCODE_NAMES.get(opcode, f"0x{opcode:04X}")
-    return ("INFO" if opcode in _BENIGN_FAILURE_OPCODES else "ERROR"), name
+    benign = opcode in _BENIGN_FAILURE_OPCODES or (opcode, status) in _BENIGN_FAILURES
+    return ("INFO" if benign else "ERROR"), name
 
 
 def format_duration(start_time: Optional[datetime.datetime], end_time: Optional[datetime.datetime]) -> str:
@@ -312,7 +316,7 @@ class CaptureStats:
                 status = payload[5]
                 if status != 0x00:
                     err_str = HCI_ERROR_CODES.get(status, f"0x{status:02X}")
-                    level, opcode_name = _command_failure(opcode)
+                    level, opcode_name = _command_failure(opcode, status)
                     self.issues.append({
                         "timestamp": ts,
                         "level": level,
@@ -327,7 +331,7 @@ class CaptureStats:
                 opcode = payload[4] | (payload[5] << 8)
                 if status != 0x00:
                     err_str = HCI_ERROR_CODES.get(status, f"0x{status:02X}")
-                    level, opcode_name = _command_failure(opcode)
+                    level, opcode_name = _command_failure(opcode, status)
                     self.issues.append({
                         "timestamp": ts,
                         "level": level,

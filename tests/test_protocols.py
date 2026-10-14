@@ -8,7 +8,7 @@ import unittest
 from btsnoop_parser import android_auto, avdtp, avrcp
 from btsnoop_parser.hfp import HfpSession, looks_like_at, split_lines
 from btsnoop_parser.l2cap import L2capDecoder
-from btsnoop_parser.protocols import ProtocolTrace
+from btsnoop_parser.protocols import ProtocolTrace, print_profiles
 from btsnoop_parser.rfcomm import parse_frame
 
 _TS = datetime.datetime(2024, 1, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
@@ -593,6 +593,105 @@ class TestAndroidAuto(unittest.TestCase):
     def test_needs_the_advertised_service(self):
         trace = self._session(self._capture(advertise=False))
         self.assertFalse([e for e in trace.events if e.protocol == "AAuto"])
+
+
+
+class TestProfiles(unittest.TestCase):
+    """The per-device summary --stats prints."""
+
+    _DEVICE = "11:22:33:44:55:66"
+
+    def _profile(self, capture: _Capture):
+        trace = _trace(capture)
+        trace.finish()
+        return trace, trace.profiles[self._DEVICE]
+
+    def test_music_streams_and_offload(self):
+        capture = TestA2dpTrace()._session()
+        capture.wait(10.0)
+        capture.avdtp("RX", 0x0051, 5, 0, 0x09, bytes([0x04]))
+        capture.avdtp("TX", _SIG, 5, 2, 0x09)
+        _, profile = self._profile(capture)
+        self.assertEqual(profile.codec, "SBC 44.1 kHz joint stereo, bitpool 2-53")
+        self.assertEqual(len(profile.streams), 1)
+        start, end, packets, _ = profile.streams[0]
+        self.assertGreaterEqual((end - start).total_seconds(), 10.0)
+        self.assertEqual(packets, 0)
+
+    def _controls(self) -> _Capture:
+        capture = _Capture()
+        capture.connected()
+        capture.open_channel(psm=0x0017, scid=0x0041, dcid=0x0051)
+        return capture
+
+    def test_buttons_tracks_and_errors(self):
+        capture = self._controls()
+        capture.l2cap("RX", 0x0051, _avrcp(1, False, 0x0, 0x7C, bytes([0x4B, 0])))
+        capture.l2cap("RX", 0x0051, _avrcp(2, False, 0x0, 0x7C, bytes([0xCB, 0])))  # release: not a second press
+        title = b"Song"
+        details = bytes([1]) + struct.pack(">IHH", 1, 106, len(title)) + title
+        capture.l2cap("TX", 0x0041, _vendor(3, True, 0xC, 0x20, details))
+        capture.l2cap("TX", 0x0041, _vendor(3, True, 0xC, 0x20, details))  # same song again
+        capture.l2cap("TX", 0x0041, _vendor(4, True, 0xD, 0x31, bytes([0x01, 0xFF])))
+        _, profile = self._profile(capture)
+        self.assertEqual(profile.buttons, {"Next": 1})
+        self.assertEqual([t[1] for t in profile.tracks], ["Song"])
+        self.assertEqual(profile.player_errors, 1)
+
+    def test_volume_override_is_detected(self):
+        capture = self._controls()
+        for _ in range(2):
+            capture.l2cap("TX", 0x0041, _vendor(5, False, 0x0, 0x50, bytes([0x40])))  # phone sets 50%
+            capture.l2cap("RX", 0x0051, _vendor(6, True, 0xD, 0x31, bytes([0x0D, 0x12])))  # device says 14%
+        capture.l2cap("TX", 0x0041, _vendor(5, False, 0x0, 0x50, bytes([0x12])))
+        capture.l2cap("RX", 0x0051, _vendor(6, True, 0xD, 0x31, bytes([0x0D, 0x12])))  # agrees: no override
+        _, profile = self._profile(capture)
+        self.assertEqual(profile.volume_overrides, [(50, 14), (50, 14)])
+
+    def test_calls_profile(self):
+        capture = TestProtocolTrace()._hfp_capture()
+        for line in (b"AT+BRSF=128\r", b"AT+BAC=1,2\r", b"AT+CIND=?\r", b"AT+CIND?\r"):
+            capture.rfcomm("RX", 0x0052, 6, 0xEF, line)
+        capture.rfcomm("TX", 0x0041, 6, 0xEF, b'\r\n+CIND: ("call",(0,1)),("callsetup",(0-3)),("service",(0,1))\r\n')
+        capture.rfcomm("TX", 0x0041, 6, 0xEF, b"\r\n+CIND: 0,0,0\r\n")
+        capture.rfcomm("TX", 0x0041, 6, 0xEF, b"\r\n+CIEV: 2,1\r\n\r\n+CIEV: 1,1\r\n")
+        _, profile = self._profile(capture)
+        self.assertEqual(profile.hfp_codecs, "CVSD, mSBC")
+        self.assertTrue(profile.no_service)
+        self.assertEqual((profile.incoming, profile.calls), (1, 1))
+
+    def test_android_auto_profile(self):
+        android = TestAndroidAuto()
+        trace = android._session(android._capture())
+        trace.finish()
+        profile = trace.profiles[self._DEVICE]
+        self.assertIsNotNone(profile.android_auto_start)
+        self.assertTrue(profile.android_auto_wifi[1])
+
+    def test_printed_summary(self):
+        import io
+        from contextlib import redirect_stdout
+        capture = self._controls()
+        capture.l2cap("RX", 0x0051, _avrcp(1, False, 0x0, 0x7C, bytes([0x44, 0])))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            print_profiles(_trace(capture), color=False)
+        text = out.getvalue()
+        self.assertIn("Buttons pressed on the device: Play x1", text)
+        self.assertIn("Not seen in this capture: music (A2DP or LE Audio), calls (HFP), Android Auto", text)
+
+    def test_le_audio_streams(self):
+        capture = _Capture()
+        # LE Enhanced Connection Complete: [0x3E, Len, Sub, Status, Handle(2), Role, AddrType, Addr(6), ...]
+        capture.event(bytes([0x3E, 0x1F, 0x0A, 0x00, 0x40, 0x00, 0x00, 0x00]) + _ADDR + bytes(19))
+        capture._add(0x01, "TX", bytes([0x64, 0x20, 0x05, 0x01, 0x60, 0x00, 0x40, 0x00]))  # LE Create CIS
+        capture.event(bytes([0x3E, 0x1D, 0x19, 0x00, 0x60, 0x00]) + bytes(22))  # CIS Established
+        capture.wait(30.0)
+        capture.event(bytes([0x05, 0x04, 0x00, 0x60, 0x00, 0x16]))
+        _, profile = self._profile(capture)
+        self.assertEqual(len(profile.le_audio), 1)
+        start, end = profile.le_audio[0]
+        self.assertGreaterEqual((end - start).total_seconds(), 30.0)
 
 
 if __name__ == "__main__":
