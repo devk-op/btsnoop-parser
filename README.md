@@ -52,7 +52,7 @@ so treat `--ai` as a plain-English starting point and check it against `--stats`
 ## Features
 
 - Parses BTSnoop HCI logs into friendly Python dicts — zero dependencies.
-- Wireshark-style CLI table with direction colouring.
+- Wireshark-style packet list: each answer names its command and result, failures in red, and data packets say what they carry (e.g. "AVRCP: Next pressed", "HFP: AT+CLCC").
 - **`--filter`** — filter by packet type and direction before processing.
 - **`--pcap`** — export to PCAP (link type 201) for Wireshark / tshark.
 - **`--stats`** — connection history, device list, issue detection, and a per-device profile summary: music played and for how long, codec, buttons pressed, songs, volume changes (including a device overriding the phone), calls and cellular service, LE Audio streams, Android Auto start-up.

@@ -210,7 +210,7 @@ def main() -> None:
         print(json.dumps(data, indent=indent))
         return
 
-    print_table(limited, limit=args.limit, color=not args.no_color)
+    print_table(limited, limit=args.limit, color=not args.no_color, trace=_build_protocol_trace(records))
 
     if args.decode:
         for record in limited:

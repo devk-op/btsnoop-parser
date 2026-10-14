@@ -104,3 +104,61 @@ class AndroidTimestampOffsetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class TestPacketList(unittest.TestCase):
+    """The default packet list describes what each packet is about."""
+
+    def _record(self, index, packet_type, payload, direction="RX"):
+        import datetime
+        return {"index": index, "timestamp": datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),
+                "delta": 0.0, "direction": direction, "packet_type": packet_type, "payload": payload,
+                "original_length": len(payload) + 1, "captured_length": len(payload) + 1}
+
+    def _lines(self, records):
+        import io
+        from btsnoop_parser.core import print_table
+        out = io.StringIO()
+        print_table(records, color=False, file=out)
+        return out.getvalue().splitlines()[1:]
+
+    def test_answers_name_their_command_and_status(self):
+        lines = self._lines([
+            self._record(1, 0x01, bytes([0x03, 0x0C, 0x00]), "TX"),
+            self._record(2, 0x04, bytes([0x0E, 0x04, 0x01, 0x03, 0x0C, 0x00])),
+            self._record(3, 0x04, bytes([0x0F, 0x04, 0x0C, 0x01, 0x04, 0x08])),
+        ])
+        self.assertTrue(lines[0].endswith("HCI_CMD    Reset"))
+        self.assertTrue(lines[1].endswith("Command Complete: Reset - Success"))
+        self.assertTrue(lines[2].endswith("Command Status: Exit Sniff Mode - Command Disallowed"))
+
+    def test_connection_events(self):
+        addr = bytes.fromhex("665544332211")
+        lines = self._lines([
+            self._record(1, 0x04, bytes([0x03, 0x0B, 0x00, 0x0B, 0x00]) + addr + bytes([0x01, 0x00])),
+            self._record(2, 0x04, bytes([0x05, 0x04, 0x00, 0x0B, 0x00, 0x13])),
+            self._record(3, 0x04, bytes([0x14, 0x06, 0x00, 0x0B, 0x00, 0x02, 0x20, 0x03])),
+        ])
+        self.assertIn("Connection Complete: 11:22:33:44:55:66 handle 0x00B - Success", lines[0])
+        self.assertIn("Disconnected: handle 0x00B - Remote User Terminated Connection", lines[1])
+        self.assertIn("Mode Change: handle 0x00B now sniff", lines[2])
+
+    def test_failures_are_red(self):
+        import io
+        from btsnoop_parser.core import print_table
+        out = io.StringIO()
+        print_table([self._record(1, 0x04, bytes([0x0E, 0x04, 0x01, 0x03, 0x0C, 0x0C]))], color=True, file=out)
+        self.assertIn("\033[31mCommand Complete: Reset - Command Disallowed", out.getvalue())
+
+    def test_data_packets_say_what_they_carry(self):
+        import struct
+        avctp = bytes([0x10, 0x11, 0x0E, 0x00, 0x48, 0x7C, 0x4B, 0x00])  # Next pressed
+        frame = struct.pack("<HH", len(avctp), 0x0041) + avctp
+        lines = self._lines([self._record(1, 0x02, struct.pack("<HH", 0x200B, len(frame)) + frame)])
+        self.assertTrue(lines[0].endswith("AVRCP      Next pressed"))
+
+    def test_le_subevent_names(self):
+        from btsnoop_parser.packet_info import LE_SUBEVENT_NAMES
+        self.assertEqual(LE_SUBEVENT_NAMES[0x0A], "LE Enhanced Connection Complete")
+        self.assertEqual(LE_SUBEVENT_NAMES[0x0D], "LE Extended Advertising Report")

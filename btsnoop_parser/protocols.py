@@ -124,6 +124,8 @@ class ProtocolTrace:
         self.data_frames = 0
         self.truncated_frames = 0
         self.profiles: dict[str, DeviceProfiles] = {}
+        self.frame_labels: dict[int, str] = {}  # record index of a frame's first packet -> protocol
+        self._events_by_index: Optional[dict[int, list[ProtocolEvent]]] = None
         self._last_timestamp: Optional[datetime.datetime] = None
         self._cis_owner: dict[int, int] = {}  # LE Audio stream handle -> connection handle
         self._open_cis: set[int] = set()
@@ -145,7 +147,7 @@ class ProtocolTrace:
 
     def analyze_record(self, record: Mapping[str, Any]) -> None:
         """Ingest a single record."""
-        self._last_timestamp = record["timestamp"]
+        self._last_timestamp = record.get("timestamp", self._last_timestamp)
         payload = record["payload"]
         # LE Create CIS: [OpcodeLSB, OpcodeMSB, Len, Count, then CISHandle(2) + ACLHandle(2) per stream]
         if record["packet_type"] == 0x01 and len(payload) >= 4 and payload[0] | (payload[1] << 8) == 0x2064:
@@ -239,6 +241,7 @@ class ProtocolTrace:
         self.data_frames += 1
         self.truncated_frames += frame.truncated
         protocol = self._identify(frame)
+        self.frame_labels[frame.index] = protocol
         self.frame_counts[(self.device(frame.handle), protocol)] += 1
         for text, is_error in frame.notes:
             self._add(frame, frame.handle, "L2CAP", text, is_error=is_error)
@@ -407,6 +410,16 @@ class ProtocolTrace:
         codec = f" {self._codecs[handle]}" if handle in self._codecs else ""
         detail = f"{seconds:.1f} s of{codec} audio: {stream.packets:,} packets, {stream.size / 1024:.0f} KB{rate}{note}"
         self._add(source, handle, "A2DP", "Stream summary", detail=detail, direction=stream.first.direction)
+
+    def events_by_index(self) -> dict[int, list[ProtocolEvent]]:
+        """Timeline events grouped by the record index they came from."""
+        self.finish()
+        if self._events_by_index is None:
+            grouped: dict[int, list[ProtocolEvent]] = collections.defaultdict(list)
+            for event in self.events:
+                grouped[event.index].append(event)
+            self._events_by_index = dict(grouped)
+        return self._events_by_index
 
     def finish(self) -> None:
         """Close out streams still running at the end of the capture and order the timeline."""

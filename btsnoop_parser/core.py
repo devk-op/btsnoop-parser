@@ -9,6 +9,7 @@ import os
 import struct
 from typing import BinaryIO, Iterator, Mapping, MutableMapping, Optional, Sequence, Union
 
+from . import packet_info
 from .constants import HCI_OPCODE_NAMES
 
 BTSNOOP_HEADER = b"btsnoop\0"
@@ -26,29 +27,9 @@ HCI_PACKET_TYPES = {
     0x05: "ISO Data",  # BLE isochronous (LE Audio)
 }
 
-# Common event codes
-EVENT_NAMES = {
-    0x01: "Inquiry Complete",
-    0x02: "Inquiry Result",
-    0x03: "Connection Complete",
-    0x05: "Disconnection Complete",
-    0x0E: "Command Complete",
-    0x0F: "Command Status",
-    0x3E: "LE Meta Event",
-}
-
-# LE Meta subevents
-LE_SUBEVENT_NAMES = {
-    0x01: "LE Connection Complete",
-    0x02: "LE Advertising Report",
-    0x03: "LE Connection Update Complete",
-    0x0A: "LE PHY Update Complete",
-    0x0E: "LE Extended Advertising Report",
-    0x0F: "LE Periodic Adv Sync Established",
-    0x12: "LE Channel Selection Algorithm",
-    0x19: "LE CIS Established",
-    0x1D: "LE BIG Info Adv Report",
-}
+# Event and LE subevent names live with the packet descriptions; kept here for existing imports.
+EVENT_NAMES = packet_info.EVENT_NAMES
+LE_SUBEVENT_NAMES = packet_info.LE_SUBEVENT_NAMES
 
 CMD_NAMES = HCI_OPCODE_NAMES
 
@@ -65,34 +46,10 @@ def _proto_name(packet_type: int) -> str:
 
 def _decode_info(packet_type: int, payload: bytes, direction: str) -> str:
     """Produce a short human-friendly info string similar to Wireshark."""
-    send_recv = "Sent" if direction == "TX" else "Rcvd"
-
-    if packet_type == 0x01:  # Command
-        if len(payload) >= 3:
-            opcode = payload[0] | (payload[1] << 8)
-            name = CMD_NAMES.get(opcode, f"Opcode 0x{opcode:04X}")
-            return f"{send_recv} Command {name}"
-        return f"{send_recv} Command (short)"
-
-    if packet_type == 0x04:  # Event
-        if len(payload) >= 2:
-            evt = payload[0]
-            name = EVENT_NAMES.get(evt, f"Event 0x{evt:02X}")
-            if evt == 0x3E and len(payload) >= 3:
-                sub = payload[2]
-                subname = LE_SUBEVENT_NAMES.get(sub, f"Subevent 0x{sub:02X}")
-                return f"{send_recv} LE Meta: {subname}"
-            return f"{send_recv} {name}"
-        return f"{send_recv} Event (short)"
-
-    if packet_type == 0x02:
-        return f"{send_recv} ACL Data (len {len(payload)})"
-    if packet_type == 0x03:
-        return f"{send_recv} SCO Data (len {len(payload)})"
-    if packet_type == 0x05:
-        return f"{send_recv} ISO Data (len {len(payload)})"
-
-    return f"{send_recv} {_proto_name(packet_type)}"
+    text, _ = packet_info.describe(packet_type, payload)
+    if text is not None:
+        return text
+    return f"{_proto_name(packet_type)} (len {len(payload)})"
 
 
 _ANDROID_TS_OFFSET = _dt.timedelta(days=378)
@@ -221,63 +178,95 @@ def parse_btsnoop_file(filename: Union[str, os.PathLike]) -> list[MutableMapping
     return list(iter_records(filename))
 
 
+# Short names for the packet list's Protocol column.
+_COLUMN_NAMES = {
+    "AVCTP": "AVRCP", "AVCTP Browsing": "AVRCP-BR", "AVDTP": "A2DP", "A2DP Media": "A2DP",
+    "L2CAP Signaling": "L2CAP", "HID Control": "HID", "HID Interrupt": "HID",
+}
+
+
+def _column(protocol: str) -> str:
+    return "L2CAP" if protocol.startswith("PSM ") else _COLUMN_NAMES.get(protocol, protocol)[:10]
+
+
+def _data_info(record: Mapping[str, object], trace) -> tuple[str, str, bool]:
+    """(protocol, description, is_error) for a data packet, from the protocol decoding."""
+    index = record["index"]
+    protocol = trace.frame_labels.get(index) if trace is not None else None
+    events = trace.events_by_index().get(index, []) if trace is not None else []
+    size = len(record["payload"])  # type: ignore[arg-type]
+    if not events:
+        if protocol is None:
+            return "HCI_ACL" if record["packet_type"] == 0x02 else "HCI_" + _proto_name(record["packet_type"]).split()[0], \
+                f"{'Continued data' if record['packet_type'] == 0x02 else 'Data'} (len {size})", False
+        return _column(protocol), f"{protocol} data (len {size})", False
+    parts = []
+    for event in events:
+        if event.protocol in ("AVRCP", "AAuto") and event.detail:
+            parts.append(event.detail)
+        elif event.protocol == "HFP" and event.detail and event.detail not in ("OK", "Result"):
+            parts.append(f"{event.summary}  ({event.detail})")
+        elif event.detail and event.summary not in event.detail:
+            parts.append(f"{event.summary}: {event.detail}")
+        else:
+            parts.append(event.detail or event.summary)
+    return _column(events[0].protocol), "; ".join(parts), any(e.is_error for e in events)
+
+
 def print_table(
     records: Sequence[Mapping[str, object]],
     *,
     limit: Optional[int] = None,
     color: bool = True,
     file=None,
+    trace=None,
 ) -> None:
-    """Render a Wireshark-like summary table to stdout or the provided file object."""
+    """Render a Wireshark-like packet list to stdout or the provided file object.
+
+    Commands and events are described with what they refer to and whether
+    they failed; data packets with what they carry (e.g. "AVRCP: Next pressed").
+    ``trace`` is a :class:`~btsnoop_parser.protocols.ProtocolTrace` already fed
+    with the capture; one is built from ``records`` when it is not given.
+    """
+    import sys
+
     if file is None:
-        import sys
-
         file = sys.stdout
+    if trace is None:
+        from .protocols import ProtocolTrace
 
-    # ANSI Colors
-    RESET = "\033[0m"
-    DIM = "\033[2m"
-    BLUE = "\033[34m"   # Host -> Controller
-    GREEN = "\033[32m"  # Controller -> Host
-    RED = "\033[31m"    # Errors
-    
-    header = f"{'No.':<5} {'Time':<10} {'Source':<11} {'Destination':<12} {'Protocol':<10} Info"
-    print(header, file=file)
+        trace = ProtocolTrace()
+        for record in records:
+            trace.analyze_record(record)
 
-    count = 0
-    for record in records:
+    if color:
+        RESET, BLUE, GREEN, RED = "\033[0m", "\033[34m", "\033[32m", "\033[31m"
+    else:
+        RESET = BLUE = GREEN = RED = ""
+
+    print(f"{'No.':<5} {'Time':<10} {'Source':<11} {'Destination':<12} {'Protocol':<10} Info", file=file)
+    for count, record in enumerate(records):
         if limit is not None and count >= limit:
             break
-
-        count += 1
         direction = str(record["direction"])
-        src = "host" if direction == "TX" else "controller"
-        dst = "controller" if direction == "TX" else "host"
-        
-        # Colorize Source/Dest based on direction
+        src, dst = ("host", "controller") if direction == "TX" else ("controller", "host")
         c_dir = BLUE if direction == "TX" else GREEN
-        if not color:
-            c_dir = ""
-            RESET = ""
-            RED = ""
-        
-        proto_name = str(record.get("packet_type_name") or _proto_name(record["packet_type"]))  # type: ignore[index]
-        proto = ("HCI_" + proto_name.split()[0]).ljust(10)
-        
-        info = _decode_info(
-            int(record["packet_type"]),  # type: ignore[arg-type]
-            record["packet_data"],  # type: ignore[index]
-            direction,
-        )
-        
-        # Highlight errors (naive check for 'Status' and non-zero)
-        # _decode_info currently doesn't return status, so we rely on info text if it mentions failure? 
-        # Actually better to rely on parsing logic, but for simple table view: maintain simple colors.
-        
+        packet_type = int(record["packet_type"])  # type: ignore[arg-type]
+
+        info, is_error = packet_info.describe(packet_type, record["payload"])  # type: ignore[arg-type]
+        if info is not None:
+            proto = "HCI_CMD" if packet_type == 0x01 else "HCI_EVT"
+        else:
+            proto, info, is_error = _data_info(record, trace)
+        c_info = RED if is_error else ""
         print(
-            f"{record['index']:<5} {record['delta']:.6f} {c_dir}{src:<11} {dst:<12}{RESET} {proto} {info}",
+            f"{record['index']:<5} {record['delta']:.6f} {c_dir}{src:<11} {dst:<12}{RESET} "
+            f"{proto:<10} {c_info}{info}{RESET if c_info else ''}",
             file=file,
         )
+    if file is sys.stdout and sys.stderr.isatty():
+        print("\nTip: --stats summarises what happened; --protocols shows a timeline of what the devices said.",
+              file=sys.stderr)
 
 
 def slice_records(records: Sequence[Mapping[str, object]], limit: Optional[int]) -> Sequence[Mapping[str, object]]:
