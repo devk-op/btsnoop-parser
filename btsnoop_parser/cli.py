@@ -76,6 +76,14 @@ def main() -> None:
         help="Analyze capture and show high-level statistics and issues",
     )
     parser.add_argument(
+        "--report",
+        action="store_true",
+        help=(
+            "Full session report: phone, devices, connections, link quality, music, calls, controls and "
+            "problems (combine with --json for machine-readable output)"
+        ),
+    )
+    parser.add_argument(
         "--protocols",
         action="store_true",
         help="Decode the protocols above HCI (L2CAP channels, RFCOMM, HFP) into a timeline",
@@ -152,6 +160,15 @@ def main() -> None:
         stats.print_summary(color=not args.no_color)
         from .protocols import print_profiles
         print_profiles(_build_protocol_trace(records), color=not args.no_color)
+        return
+
+    if args.report:
+        from .report import build_report, print_report
+        report = build_report(records)
+        if args.json or args.pretty:
+            print(json.dumps(report.to_dict(), indent=2 if args.pretty else None, default=str))
+        else:
+            print_report(report, color=not args.no_color)
         return
 
     if args.protocols:

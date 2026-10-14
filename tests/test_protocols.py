@@ -30,6 +30,7 @@ class _Capture:
             "timestamp": self.clock,
             "direction": direction,
             "packet_type": packet_type,
+            "packet_type_name": {0x01: "Command", 0x02: "ACL Data", 0x04: "Event"}.get(packet_type, "Other"),
             "payload": payload[:keep] if keep else payload,
             "original_length": len(payload) + 1,
             "captured_length": (min(keep, len(payload)) if keep else len(payload)) + 1,

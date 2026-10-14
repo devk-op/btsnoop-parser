@@ -383,7 +383,7 @@ class ProtocolTrace:
             profile.gatt_updates[msg.detail.split(": ")[0]] += 1
         if decoded is None or not from_device and msg.summary != "Write":
             return
-        if uuid in (0x2A29, 0x2A24, 0x2A26, 0x2A28, 0x2A00, 0x2A01) and from_device:
+        if uuid in (0x2A29, 0x2A24, 0x2A26, 0x2A28, 0x2A00, 0x2A01) and from_device and decoded != "unknown":
             profile.device_info[name] = decoded
         elif uuid == 0x2A19 and from_device:
             profile.battery.append(int(decoded.rstrip("%")))

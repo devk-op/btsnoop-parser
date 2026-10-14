@@ -55,6 +55,7 @@ so treat `--ai` as a plain-English starting point and check it against `--stats`
 - Wireshark-style packet list: each answer names its command and result, failures in red, and data packets say what they carry (e.g. "AVRCP: Next pressed", "HFP: AT+CLCC").
 - **`--filter`** — filter by packet type and direction before processing.
 - **`--pcap`** — export to PCAP (link type 201) for Wireshark / tshark.
+- **`--report`** — the full session report: the phone (name, address, Bluetooth version, chip), each device (name, type, Bluetooth version, chip, signal), each connection (who started it, how long connecting took, how and why it ended, pairing and encryption, LE link settings, power saving, data sent), every profile in use, and the problems found. Add `--json` for machine-readable output.
 - **`--stats`** — connection history, device list, issue detection, and a per-device profile summary: music played and for how long, codec, buttons pressed, songs, volume changes (including a device overriding the phone), calls and cellular service, LE Audio streams, Android Auto start-up.
 - **`--protocols`** — timeline of what the devices said above HCI: L2CAP channels, A2DP streaming (codec, start, pause, stalls), AVRCP buttons, volume and track changes, wireless Android Auto start-up, GATT (services, device name, battery, heart rate), LE Audio stream set-up (codec, link quality, what each stream is for, failures), volume, media and call control, RFCOMM serial ports, HFP commands in plain English, voice links. Works on filtered Android logs too.
 - **`--ai`** — a small local model, fine-tuned on HCI sessions, says in plain English whether anything failed and why (runs offline, optional extra).
@@ -92,6 +93,10 @@ btsnoop_parser capture.log --filter type:event --pcap events.pcap
 
 # Convert the whole capture to PCAP
 btsnoop_parser capture.log --pcap full.pcap
+
+# Everything the capture says about the session, in one report
+btsnoop_parser capture.log --report
+btsnoop_parser capture.log --report --json > session.json
 
 # Capture statistics and issue detection
 btsnoop_parser capture.log --stats

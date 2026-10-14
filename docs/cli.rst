@@ -55,6 +55,18 @@ Options
    changes, calls and cellular service, and Android Auto start-up. Profiles
    with no activity are listed as not seen.
 
+.. option:: --report
+
+   Print the full session report: the phone (name, address, Bluetooth version,
+   chip maker), each device (name, type, Bluetooth version, chip maker, signal
+   strength), each connection (who started it, how long connecting took, how
+   and why it ended, pairing and authentication outcomes, encryption, LE link
+   settings, power-saving time, data sent and received), the profile summary
+   for each device, and the problems found. Devices that were connected before
+   the capture began are included from their traffic. With ``--json`` (or
+   ``--pretty``) the report is printed as JSON. Pairing keys and other security
+   material are never included.
+
 .. option:: --protocols
 
    Decode the protocols carried above HCI and print a timeline: L2CAP channels

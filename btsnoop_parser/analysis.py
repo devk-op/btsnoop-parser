@@ -340,6 +340,31 @@ class CaptureStats:
                         "code": status,
                     })
 
+            # Authentication Complete (0x06) failed: [Event, Len, Status, Handle(2)]
+            elif event_code == 0x06 and len(payload) >= 5 and payload[2] != 0x00:
+                status = payload[2]
+                handle = payload[3] | (payload[4] << 8)
+                self.issues.append({
+                    "timestamp": ts,
+                    "level": "WARN",
+                    "title": "Authentication Failed",
+                    "detail": f"Handle 0x{handle:03X} could not authenticate: "
+                              f"{HCI_ERROR_CODES.get(status, f'0x{status:02X}')}",
+                    "code": status,
+                })
+
+            # Simple Pairing Complete (0x36) failed: [Event, Len, Status, Addr(6)]
+            elif event_code == 0x36 and len(payload) >= 9 and payload[2] != 0x00:
+                status = payload[2]
+                bd_addr = ":".join(f"{x:02X}" for x in payload[3:9][::-1])
+                self.issues.append({
+                    "timestamp": ts,
+                    "level": "WARN",
+                    "title": "Pairing Failed",
+                    "detail": f"Pairing with {bd_addr} failed: {HCI_ERROR_CODES.get(status, f'0x{status:02X}')}",
+                    "code": status,
+                })
+
             # Hardware Error (0x10)
             # Payload: [Event(0), Len(1), HardwareCode(2)]
             elif event_code == 0x10 and len(payload) >= 3:
