@@ -243,7 +243,7 @@ def ask(
     with torch.no_grad():
         output = model.generate(
             **inputs,
-            max_new_tokens=400,
+            max_new_tokens=640,  # room for several problems plus the session summary
             do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
         )
