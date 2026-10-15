@@ -39,7 +39,7 @@ def _correct(answer: str, facts: list[str]) -> bool:
     text = answer.lower()
     if facts == ["NORMAL"]:
         return any(p in text for p in NORMAL_PHRASES)
-    return all(f.lower() in text for f in facts)
+    return all(f.lower() in text for f in facts)  # every fact, including "nothing failed" for normal sessions
 
 
 def main() -> None:
@@ -65,7 +65,7 @@ def main() -> None:
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     model = model.to(device).eval()
 
-    label = Path(args.model).name + ("+lora" if args.adapter else "")
+    label = Path(args.model).name + (f"+{Path(args.adapter).name}" if args.adapter else "")
     print(f"Scoring {label} on {len(examples)} holdout examples ({device})")
     by_kind: dict[str, list[bool]] = collections.defaultdict(list)
     rows = []

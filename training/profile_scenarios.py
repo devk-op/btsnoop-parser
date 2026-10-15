@@ -410,17 +410,39 @@ _NEEDS_CAR = {"aa_fail", "sync_fail", "lost_pairing"}
 def pick_problems(rng: random.Random) -> list[str]:
     """Two or three problems that can occur in the same session."""
     while True:
-        picked = rng.sample(COMBINABLE, rng.choice([2, 2, 3]))
+        picked = rng.sample(COMBINABLE, rng.choice([2, 3, 3, 4]))
         if not ("a2dp_reject" in picked and _NEEDS_MUSIC & set(picked)):
             return picked
 
 
+TRACKER_NAMES = ["Fit Band", "Sport Watch", "Health Ring", "Step Tracker"]
+
+
+def tracker_session(s: ProfileSession, mac: str, rng: random.Random) -> None:
+    """A second, unrelated LE device (a fitness tracker) connected in the same capture."""
+    handle = s.handle("le")
+    s.le_connect(mac, handle, 0x00, enhanced=True)
+    name = rng.choice(TRACKER_NAMES).encode()
+    s.acl(handle, "TX", 0x0004, bytes([0x08, 0x01, 0x00, 0xFF, 0xFF, 0x00, 0x2A]), gap=0.2)
+    s.acl(handle, "RX", 0x0004, bytes([0x09, 2 + len(name), 0x03, 0x00]) + name)
+    for _ in range(rng.randrange(3, 12)):
+        s.acl(handle, "RX", 0x0004, bytes([0x1B, 0x44, 0x00]) + bytes(rng.randrange(4, 16)),
+              gap=rng.uniform(0.5, 5.0))
+    s.disconnect(handle, rng.choice([0x13, 0x16]))
+
+
 def build_profile_session(rng: random.Random, mac: str, kind: str, problems: list[str] | None = None,
-                          **choices) -> ProfileSession:
-    """One session; `kind` is a scenario name, or "multi" with several `problems`."""
+                          second_device: str | None = None, **choices) -> ProfileSession:
+    """One session; `kind` is a scenario name, or "multi" with several `problems`.
+
+    With `second_device`, an unrelated fitness tracker connects before or after the main device.
+    """
     s = ProfileSession(rng)
     s.startup()
     s.routine_noise()
+    tracker_first = rng.random() < 0.5
+    if second_device and tracker_first:
+        tracker_session(s, second_device, rng)
     if kind in ("le_normal", "le_audio_fail"):
         le_session(s, mac, kind, rng, choices.get("le_failure"))
     else:
@@ -429,4 +451,6 @@ def build_profile_session(rng: random.Random, mac: str, kind: str, problems: lis
             kind != "headset_normal" and rng.random() < 0.5)
         classic_session(s, mac, wanted, rng, car=car, a2dp_reject=choices.get("a2dp_reject"),
                         sync_fail=choices.get("sync_fail"), aa_status=choices.get("aa_status"))
+    if second_device and not tracker_first:
+        tracker_session(s, second_device, rng)
     return s

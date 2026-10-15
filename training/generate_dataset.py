@@ -385,7 +385,7 @@ PROFILE_PLAN = [
     ("car_normal", 80, 12), ("headset_normal", 60, 10), ("le_normal", 50, 8), ("volume_override", 60, 10),
     ("player_error", 55, 10), ("no_service", 55, 10), ("stall", 55, 10), ("a2dp_reject", 55, 10),
     ("le_audio_fail", 55, 10), ("aa_fail", 45, 8), ("lost_pairing", 45, 8), ("sync_fail", 45, 8),
-    ("multi", 300, 30),
+    ("multi", 450, 40),
 ]
 
 
@@ -399,7 +399,11 @@ def _run_profile(kind: str, rng, devices, holdout: bool) -> dict:
             key, train_values, held_values = PROFILE_CHOICES[problem]
             choices[key] = rng.choice(held_values if holdout else train_values)
     mac = rng.choice(devices)
-    session = build_profile_session(rng, mac, kind, problems=problems if kind == "multi" else None, **choices)
+    # Some sessions have an unrelated second device, so each device's times must be kept apart.
+    second = rng.choice([d for d in devices if d != mac]) if (
+        kind in ("multi", "car_normal", "headset_normal") and rng.random() < 0.4) else None
+    session = build_profile_session(rng, mac, kind, problems=problems if kind == "multi" else None,
+                                    second_device=second, **choices)
     stats, report = _report(session.records)
     routine = [label for label in ("the vendor-specific command probe", "Delete Stored Link Key", "Sniff Subrating")
                if any(i["level"] == "INFO" and _routine_matches(label, i["detail"]) for i in stats.issues)]
@@ -418,6 +422,15 @@ def _run_profile(kind: str, rng, devices, holdout: bool) -> dict:
         if not has_problem or len(facts) < len(problems) + 1 or not all(
                 profile_answers.visible(report, stats, mac, problem) for problem in problems):
             return {"input": "x" * (MAX_INPUT_CHARS + 1)}
+    if second:
+        # The main device's own end time, not the other device's, must appear in the answer.
+        ends = [c.end for c in report.connections if c.device == mac and c.end]
+        if ends:
+            stamp = ends[-1].astimezone().strftime("%H:%M:%S")
+            if f"ended at {stamp}" in answer:
+                facts = [f for f in facts if f != "NORMAL"] + [f"ended at {stamp}"]
+                if kind.endswith("_normal"):
+                    facts.insert(0, "nothing failed")
     return _example(context, answer, facts, kind)
 
 
