@@ -197,8 +197,9 @@ def iter_records(
             "captured_length": incl_len,
             "flags": flags,
             "drops": drops,
-            "adapter": adapter,  # controller index; only btmon captures can hold more than one
         }
+        if datalink == DATALINK_MONITOR:
+            record["adapter"] = adapter  # controller index; btmon can capture several at once
         yield record
 
 
