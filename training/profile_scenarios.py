@@ -50,6 +50,7 @@ class ProfileSession(Session):
     def __init__(self, rng: random.Random):
         super().__init__(rng)
         self._next_cid = 0x40
+        self._device_cids: set[int] = set()
         self._label = 0
 
     # --- L2CAP -------------------------------------------------------------------------------------
@@ -64,7 +65,8 @@ class ProfileSession(Session):
 
     def open_channel(self, handle: int, psm: int, phone_starts: bool) -> Channel:
         phone_cid, self._next_cid = self._next_cid, self._next_cid + 1
-        device_cid = self.rng.randrange(0x40, 0x80)
+        device_cid = self.rng.choice([c for c in range(0x40, 0x100) if c not in self._device_cids])
+        self._device_cids.add(device_cid)
         ident = self.rng.randrange(1, 255)
         if phone_starts:
             self.acl(handle, "TX", 0x0001, struct.pack("<BBHHH", 0x02, ident, 4, psm, phone_cid))
@@ -337,46 +339,46 @@ def _encrypt(s: ProfileSession, handle: int) -> None:
     s.event(bytes([0x59, 0x05, 0x00, handle & 0xFF, handle >> 8, 0x01, 0x10]), gap=0.3)
 
 
-def classic_session(s: ProfileSession, mac: str, kind: str, rng: random.Random, *, car: bool,
+def classic_session(s: ProfileSession, mac: str, problems: set[str], rng: random.Random, *, car: bool,
                     a2dp_reject: int | None = None, sync_fail: int | None = None, aa_status: int | None = None):
-    """A phone connecting to a car or headset and using it; `kind` picks the one thing that goes wrong."""
+    """A phone connecting to a car or headset and using it; `problems` are the things that go wrong."""
     handle = s.handle("classic")
     s.classic_connect(mac, handle, 0x00)
     _encrypt(s, handle)
     rfcomm = s.rfcomm_open(handle)
-    s.hfp_setup(rfcomm, service=0 if kind == "no_service" else 1)
+    s.hfp_setup(rfcomm, service=0 if "no_service" in problems else 1)
     avrcp = s.avrcp_open(handle)
     sig, media = s.a2dp_setup(handle, rng.choice(["SBC", "SBC", "AAC"]), reject=a2dp_reject)
-    if car and (kind == "sync_fail" or rng.random() < 0.6):
-        s.obex(handle, "pbap", rng.randrange(5, 120), sync_fail if kind == "sync_fail" else None)
+    if car and ("sync_fail" in problems or rng.random() < 0.6):
+        s.obex(handle, "pbap", rng.randrange(5, 120), sync_fail if "sync_fail" in problems else None)
         if rng.random() < 0.5:
             s.obex(handle, "map", rng.randrange(1, 40), None)
     if media is not None:
-        offload = rng.random() < 0.5 and kind != "stall"
+        offload = rng.random() < 0.5 and "stall" not in problems
         for play in range(rng.randrange(1, 4)):
             title, artist = song(rng)
             s.track(avrcp, title, artist)
             s.play_status(avrcp, 1)
             s.a2dp_play(sig, media, rng.uniform(6.0, 40.0), offload,
-                        stall=rng.uniform(2.6, 9.0) if kind == "stall" and play == 0 else 0.0)
+                        stall=rng.uniform(2.6, 9.0) if "stall" in problems and play == 0 else 0.0)
             for _ in range(rng.randrange(0, 4)):
                 s.button(avrcp, rng.choice(list(BUTTONS)))
-                if kind == "player_error" and play == 0:
+                if "player_error" in problems and play == 0:
                     s.play_status(avrcp, 0xFF, gap=0.6)
-            if kind == "player_error" and play == 0:
+            if "player_error" in problems and play == 0:
                 s.play_status(avrcp, 0xFF, gap=0.4)
             s.play_status(avrcp, 2)
-        overrides = kind == "volume_override"
+        overrides = "volume_override" in problems
         fixed = rng.randrange(10, 40)
         for _ in range(rng.randrange(3, 7) if overrides else rng.randrange(0, 3)):
             target = rng.randrange(20, 90)
             s.phone_volume(avrcp, target, device_answers=fixed if overrides else target)
-    if rng.random() < 0.3 and kind != "no_service":
+    if rng.random() < 0.3 and "no_service" not in problems:
         s.hfp_call(rfcomm, handle, mac, s.handle("classic"), rng.uniform(10.0, 90.0))
-    if car and (kind == "aa_fail" or rng.random() < 0.3):
-        s.android_auto(handle, rfcomm, aa_status if kind == "aa_fail" else 0)
+    if car and ("aa_fail" in problems or rng.random() < 0.3):
+        s.android_auto(handle, rfcomm, aa_status if "aa_fail" in problems else 0)
     s.disconnect(handle, rng.choice([0x13, 0x16]))
-    if kind == "lost_pairing":
+    if "lost_pairing" in problems:
         s.classic_connect(mac, handle, 0x00)
         s.event(bytes([0x06, 0x03, 0x06, handle & 0xFF, handle >> 8]), gap=0.1)
         s.event(bytes([0x36, 0x07, 0x18]) + _addr(mac), gap=0.05)
@@ -397,15 +399,34 @@ def le_session(s: ProfileSession, mac: str, kind: str, rng: random.Random, failu
     s.disconnect(handle, rng.choice([0x13, 0x16]))
 
 
-def build_profile_session(rng: random.Random, mac: str, kind: str, **choices) -> ProfileSession:
+# Problems that can happen together on one classic connection. A rejected codec means no music,
+# so it cannot combine with the music problems.
+COMBINABLE = ["lost_pairing", "volume_override", "player_error", "no_service", "stall", "sync_fail", "aa_fail",
+              "a2dp_reject"]
+_NEEDS_MUSIC = {"volume_override", "player_error", "stall"}
+_NEEDS_CAR = {"aa_fail", "sync_fail", "lost_pairing"}
+
+
+def pick_problems(rng: random.Random) -> list[str]:
+    """Two or three problems that can occur in the same session."""
+    while True:
+        picked = rng.sample(COMBINABLE, rng.choice([2, 2, 3]))
+        if not ("a2dp_reject" in picked and _NEEDS_MUSIC & set(picked)):
+            return picked
+
+
+def build_profile_session(rng: random.Random, mac: str, kind: str, problems: list[str] | None = None,
+                          **choices) -> ProfileSession:
+    """One session; `kind` is a scenario name, or "multi" with several `problems`."""
     s = ProfileSession(rng)
     s.startup()
     s.routine_noise()
     if kind in ("le_normal", "le_audio_fail"):
         le_session(s, mac, kind, rng, choices.get("le_failure"))
     else:
-        car = kind in ("car_normal", "aa_fail", "sync_fail", "lost_pairing") or (
-            kind not in ("headset_normal",) and rng.random() < 0.5)
-        classic_session(s, mac, kind, rng, car=car, a2dp_reject=choices.get("a2dp_reject"),
+        wanted = set(problems or ([] if kind.endswith("_normal") else [kind]))
+        car = kind == "car_normal" or bool(wanted & _NEEDS_CAR) or (
+            kind != "headset_normal" and rng.random() < 0.5)
+        classic_session(s, mac, wanted, rng, car=car, a2dp_reject=choices.get("a2dp_reject"),
                         sync_fail=choices.get("sync_fail"), aa_status=choices.get("aa_status"))
     return s

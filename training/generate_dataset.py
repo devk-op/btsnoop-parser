@@ -385,31 +385,39 @@ PROFILE_PLAN = [
     ("car_normal", 80, 12), ("headset_normal", 60, 10), ("le_normal", 50, 8), ("volume_override", 60, 10),
     ("player_error", 55, 10), ("no_service", 55, 10), ("stall", 55, 10), ("a2dp_reject", 55, 10),
     ("le_audio_fail", 55, 10), ("aa_fail", 45, 8), ("lost_pairing", 45, 8), ("sync_fail", 45, 8),
+    ("multi", 300, 30),
 ]
 
 
 def _run_profile(kind: str, rng, devices, holdout: bool) -> dict:
-    choices = {}
-    if kind in PROFILE_CHOICES:
-        key, train_values, held_values = PROFILE_CHOICES[kind]
-        choices[key] = rng.choice(held_values if holdout else train_values)
-    from training.profile_scenarios import build_profile_session  # imports this module's Session
+    from training.profile_scenarios import build_profile_session, pick_problems  # import this module's Session
 
+    problems = pick_problems(rng) if kind == "multi" else [kind]
+    choices = {}
+    for problem in problems:
+        if problem in PROFILE_CHOICES:
+            key, train_values, held_values = PROFILE_CHOICES[problem]
+            choices[key] = rng.choice(held_values if holdout else train_values)
     mac = rng.choice(devices)
-    session = build_profile_session(rng, mac, kind, **choices)
+    session = build_profile_session(rng, mac, kind, problems=problems if kind == "multi" else None, **choices)
     stats, report = _report(session.records)
     routine = [label for label in ("the vendor-specific command probe", "Delete Stored Link Key", "Sniff Subrating")
                if any(i["level"] == "INFO" and _routine_matches(label, i["detail"]) for i in stats.issues)]
     context = build_context(stats, report=report)
-    problems = "WARNING" in context or any(i["level"] != "INFO" for i in stats.issues)
+    has_problem = "WARNING" in context or any(i["level"] != "INFO" for i in stats.issues)
     if kind.endswith("_normal"):
-        if problems:
+        if has_problem:
             return {"input": "x" * (MAX_INPUT_CHARS + 1)}  # rejected by keep(): a "normal" session must be clean
         answer, facts = profile_answers.normal_answer(report, routine), ["NORMAL"]
     else:
-        answer, facts = profile_answers.problem_answer(report, stats, mac, kind, routine)
-        if not problems or len(facts) < 2:
-            return {"input": "x" * (MAX_INPUT_CHARS + 1)}  # the problem must be visible in the model's input
+        if kind == "multi":
+            answer, facts = profile_answers.multi_answer(report, stats, mac, problems, routine)
+        else:
+            answer, facts = profile_answers.problem_answer(report, stats, mac, kind, routine)
+        # Every problem must be visible in the model's input, or the answer would teach it to invent.
+        if not has_problem or len(facts) < len(problems) + 1 or not all(
+                profile_answers.visible(report, stats, mac, problem) for problem in problems):
+            return {"input": "x" * (MAX_INPUT_CHARS + 1)}
     return _example(context, answer, facts, kind)
 
 

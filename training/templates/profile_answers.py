@@ -63,6 +63,19 @@ FIRST_SEEN = {"volume_override": "volume", "player_error": "player", "stall": "s
               "le_audio_fail": "gatt", "sync_fail": "sync"}
 
 
+_SYNC_NAMES = {"Phonebook (PBAP)": "phonebook", "Messages (MAP)": "text messages",
+               "Message alerts (MAP)": "message alerts"}
+
+
+def _synced(transfer) -> str:
+    """e.g. 'contacts (25 entries, 3 KB)' or 'single message (343 downloaded, 147 KB)'."""
+    what = transfer.what
+    if what.startswith("phonebook (") and what.endswith(")"):
+        what = what[len("phonebook ("):-1]
+    amount = describe_transfer(transfer).split(": ", 1)[-1].split(", over")[0].split(", took")[0]
+    return f"{what} ({amount})"
+
+
 def _clock(when: Optional[datetime.datetime]) -> str:
     return when.astimezone().strftime("%H:%M:%S") if when else "an unrecorded time"
 
@@ -98,9 +111,9 @@ def _story(report: SessionReport) -> str:
                 calls = profile.incoming + profile.outgoing
                 facts.append(f"{calls} call(s)" if calls else "the hands-free link was up with no calls")
             for service, transfers in profile.syncs.items():
-                done = [describe_transfer(t).split(", over")[0] for t in transfers if t.entries or t.requests > 1]
+                done = [_synced(t) for t in transfers if (t.entries or t.requests > 1) and not t.failures]
                 if done:
-                    facts.append(f"{service.split(' (')[0].lower()} synced ({'; '.join(done)})")
+                    facts.append(f"{_SYNC_NAMES.get(service, service)} synced: {', '.join(done)}")
             if profile.android_auto_wifi and profile.android_auto_wifi[1]:
                 facts.append(f"wireless Android Auto started at {_clock(profile.android_auto_start)}")
         if connections:
@@ -182,3 +195,76 @@ def problem_answer(report: SessionReport, stats, address: str, kind: str, routin
         failed = [t for ts in profile.syncs.values() for t in ts if t.failures]
         facts = [failed[0].failures[0]] if failed else []
     return text, facts + [address]
+
+
+# Which problem to lead with: the ones that stop the device working come first.
+PRIORITY = ["lost_pairing", "a2dp_reject", "le_audio_fail", "aa_fail", "sync_fail", "stall", "no_service",
+            "player_error", "volume_override"]
+
+SHORT_LABELS = {
+    "lost_pairing": "Pairing", "a2dp_reject": "Music set-up", "le_audio_fail": "LE Audio", "aa_fail": "Android Auto",
+    "sync_fail": "Phonebook", "stall": "Audio", "no_service": "Calls", "player_error": "Music app",
+    "volume_override": "Volume",
+}
+
+SHORT_CAUSES = {
+    "lost_pairing": "the device lost its pairing with this phone; remove it on the phone and pair again",
+    "a2dp_reject": "the device rejected the stream settings, so music could not start",
+    "le_audio_fail": "the earbuds refused a stream set-up step",
+    "aa_fail": "the phone could not join the car's Wi-Fi, so wireless Android Auto could not start",
+    "sync_fail": "contact sharing is probably not allowed for this device in the phone's Bluetooth settings",
+    "stall": "usually interference, distance, or the phone being too busy",
+    "no_service": "the phone had no cellular service, so calls through the device would fail",
+    "player_error": "a problem in the music app or the track, not Bluetooth",
+    "volume_override": 'the device ignores the phone\'s volume; "Disable absolute volume" in developer options '
+                       "usually helps",
+}
+
+
+def _when(report: SessionReport, stats, address: str, kind: str) -> str:
+    profile = report.profiles.get(address)
+    when_ts = None
+    if profile is not None and kind in FIRST_SEEN:
+        when_ts = profile.first_seen.get(FIRST_SEEN[kind])
+    if kind == "aa_fail" and profile and profile.android_auto_wifi:
+        when_ts = profile.android_auto_wifi[0]
+    if kind == "lost_pairing":
+        when_ts = next((i["timestamp"] for i in stats.issues if i["title"] == "Authentication Failed"), None)
+    return "throughout the session" if kind == "no_service" else f"at {_clock(when_ts)}"
+
+
+def multi_answer(report: SessionReport, stats, address: str, kinds: list[str], routine: list[str]
+                 ) -> tuple[str, list[str]]:
+    """Answer for a session with several problems: the main one in full, then each other one briefly."""
+    ordered = sorted(kinds, key=PRIORITY.index)
+    main, rest = ordered[0], ordered[1:]
+    single, facts = problem_answer(report, stats, address, main, [])
+    what, when, cause = single.split("\n")[1:4]
+    text = ("Yes, several things failed.\n" + what.replace("(1) What failed:", "(1) Main problem:") + "\n"
+            + when + "\n" + cause + "\nAlso:")
+    for kind in rest:
+        detail = _warning_line(report, address, kind) or WHAT[kind].format(name=_name(report, address))
+        text += f"\n- {SHORT_LABELS[kind]}: {detail}, {_when(report, stats, address, kind)} — {SHORT_CAUSES[kind]}."
+        facts += problem_answer(report, stats, address, kind, [])[1][:-1]
+    story = _story(report)
+    if story:
+        text += f"\nOtherwise: {story}"
+    if routine:
+        text += (f"\nThe routine failures listed ({', '.join(routine)}) are common on Android and are not a "
+                 "problem by themselves.")
+    return text, list(dict.fromkeys(facts))
+
+
+def visible(report: SessionReport, stats, address: str, kind: str) -> bool:
+    """True when the problem shows up in what the model is given."""
+    profile = report.profiles.get(address)
+    if profile is None:
+        return kind == "lost_pairing" and any(i["title"] == "Authentication Failed" for i in stats.issues)
+    return {
+        "volume_override": bool(profile.volume_overrides), "player_error": profile.player_errors > 0,
+        "no_service": profile.no_service, "stall": profile.stalls > 0, "a2dp_reject": bool(profile.a2dp_errors),
+        "le_audio_fail": bool(profile.gatt_errors),
+        "aa_fail": bool(profile.android_auto_wifi and not profile.android_auto_wifi[1]),
+        "sync_fail": any(t.failures for ts in profile.syncs.values() for t in ts),
+        "lost_pairing": any(i["title"] == "Authentication Failed" for i in stats.issues),
+    }.get(kind, False)
