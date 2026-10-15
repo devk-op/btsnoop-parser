@@ -2,7 +2,8 @@ btsnoop-parser
 ==============
 
 A lightweight Python library and CLI for parsing and analysing Bluetooth
-``btsnoop_hci.log`` captures from Android devices — a fast, scriptable
+``btsnoop_hci.log`` captures from Android devices and Linux BlueZ captures written with
+``btmon -w`` — a fast, scriptable
 alternative to opening Wireshark.
 
 .. code-block:: bash

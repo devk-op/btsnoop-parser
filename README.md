@@ -5,8 +5,8 @@
 [![Docs](https://readthedocs.org/projects/btsnoop-parser/badge/?version=latest)](https://btsnoop-parser.readthedocs.io)
 [![Python](https://img.shields.io/pypi/pyversions/btsnoop-parser)](https://pypi.org/project/btsnoop-parser/)
 
-`btsnoop-parser` is a small library and CLI for exploring Bluetooth `btsnoop_hci.log`
-captures produced on Android devices.  It is a lightweight alternative to Wireshark
+`btsnoop-parser` is a small library and CLI for exploring Bluetooth HCI captures: Android
+`btsnoop_hci.log` files and Linux BlueZ captures written with `btmon -w`.  It is a lightweight alternative to Wireshark
 when you need a quick look at packet metadata or want to script over captures in Python.
 
 ```
@@ -51,7 +51,7 @@ so treat `--ai` as a plain-English starting point and check it against `--stats`
 
 ## Features
 
-- Parses BTSnoop HCI logs into friendly Python dicts — zero dependencies.
+- Parses BTSnoop HCI logs into friendly Python dicts — zero dependencies. Reads Android snoop logs and Linux/Raspberry Pi captures from `btmon -w capture.log`.
 - Wireshark-style packet list: each answer names its command and result, failures in red, and data packets say what they carry (e.g. "AVRCP: Next pressed", "HFP: AT+CLCC").
 - **`--filter`** — filter by packet type and direction before processing.
 - **`--pcap`** — export to PCAP (link type 201) for Wireshark / tshark.

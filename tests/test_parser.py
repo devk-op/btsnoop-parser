@@ -162,3 +162,41 @@ class TestPacketList(unittest.TestCase):
         from btsnoop_parser.packet_info import LE_SUBEVENT_NAMES
         self.assertEqual(LE_SUBEVENT_NAMES[0x0A], "LE Enhanced Connection Complete")
         self.assertEqual(LE_SUBEVENT_NAMES[0x0D], "LE Extended Advertising Report")
+
+
+class TestBtmonCaptures(unittest.TestCase):
+    """Linux BlueZ captures written with `btmon -w` (btsnoop data-link type 2001)."""
+
+    def _file(self, records: list[tuple[int, bytes]], index: int = 0) -> bytes:
+        data = b"btsnoop\0" + struct.pack(">II", 1, 2001)
+        for opcode, payload in records:
+            data += struct.pack(">IIIIQ", len(payload), len(payload), (index << 16) | opcode, 0,
+                                0x00E03AB44A676000) + payload
+        return data
+
+    def test_packet_types_and_directions_come_from_the_flags(self):
+        from btsnoop_parser.core import iter_records
+        records = list(iter_records(self._file([
+            (2, bytes([0x03, 0x0C, 0x00])),                        # command: Reset
+            (3, bytes([0x0E, 0x04, 0x01, 0x03, 0x0C, 0x00])),      # event: Command Complete
+            (4, bytes([0x0B, 0x20, 0x04, 0x00, 0x00, 0x00, 0x04, 0x00])),  # ACL sent
+            (5, bytes([0x0B, 0x20, 0x04, 0x00, 0x00, 0x00, 0x04, 0x00])),  # ACL received
+        ])))
+        self.assertEqual([(r["packet_type"], r["direction"]) for r in records],
+                         [(0x01, "TX"), (0x04, "RX"), (0x02, "TX"), (0x02, "RX")])
+        self.assertEqual(records[0]["payload"], bytes([0x03, 0x0C, 0x00]))  # no packet-type byte to strip
+
+    def test_non_hci_records_are_skipped(self):
+        from btsnoop_parser.core import iter_records
+        records = list(iter_records(self._file([
+            (0, bytes(16)),                         # new adapter
+            (12, b"Bluetooth daemon 5.72\0"),       # system note
+            (2, bytes([0x03, 0x0C, 0x00])),
+        ])))
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["index"], 1)
+
+    def test_adapter_index(self):
+        from btsnoop_parser.core import iter_records
+        records = list(iter_records(self._file([(2, bytes([0x03, 0x0C, 0x00]))], index=1)))
+        self.assertEqual(records[0]["adapter"], 1)

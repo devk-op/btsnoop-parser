@@ -52,6 +52,30 @@ def _decode_info(packet_type: int, payload: bytes, direction: str) -> str:
     return f"{_proto_name(packet_type)} (len {len(payload)})"
 
 
+# Data-link types in the file header.
+DATALINK_H1 = 1001       # labelled un-encapsulated HCI; files seen with it still use the H4 layout
+DATALINK_H4 = 1002       # HCI UART (Android): each packet starts with a packet-type byte
+DATALINK_MONITOR = 2001  # Linux BlueZ monitor (btmon -w): packet type and adapter in the flags
+
+# btmon record opcodes -> (H4 packet type, direction). Other opcodes (adapter added or
+# removed, system notes, management traffic) carry no HCI packet and are skipped.
+_MONITOR_OPCODES = {
+    2: (0x01, "TX"), 3: (0x04, "RX"), 4: (0x02, "TX"), 5: (0x02, "RX"),
+    6: (0x03, "TX"), 7: (0x03, "RX"), 18: (0x05, "TX"), 19: (0x05, "RX"),
+}
+
+
+def _decode_packet(datalink: int, flags: int, packet: bytes) -> Optional[tuple[int, str, bytes, int]]:
+    """(packet type, direction, payload, adapter index) for one record, or None to skip it."""
+    if datalink == DATALINK_MONITOR:
+        kind = _MONITOR_OPCODES.get(flags & 0xFFFF)
+        if kind is None:
+            return None
+        return kind[0], kind[1], packet, flags >> 16
+    direction = "RX" if flags & 0x1 else "TX"
+    return packet[0], direction, packet[1:], 0
+
+
 _ANDROID_TS_OFFSET = _dt.timedelta(days=378)
 
 
@@ -70,6 +94,9 @@ def iter_records(
 ) -> Iterator[MutableMapping[str, object]]:
     """
     Yield parsed records from a BTSnoop HCI capture.
+
+    Reads Android snoop logs (HCI H4) and Linux BlueZ captures written with
+    ``btmon -w`` (monitor format).
 
     The function accepts a filesystem path or raw bytes. For each record it yields
     a mutable mapping containing both modern and legacy keys:
@@ -110,8 +137,8 @@ def iter_records(
 
     version, datalink = struct.unpack(">II", data[8:16])
     LOG.debug("Parsed BTSnoop header: version=%s datalink=%s", version, datalink)
-    if datalink not in (1001, 1002):
-        LOG.warning("Unexpected datalink value %s (expected 1001 or 1002 for HCI H4)", datalink)
+    if datalink not in (DATALINK_H1, DATALINK_H4, DATALINK_MONITOR):
+        LOG.warning("Unexpected datalink value %s (expected 1001, 1002 or 2001); reading it as HCI H4", datalink)
 
     offset = 16
     index = 0
@@ -135,8 +162,10 @@ def iter_records(
 
         packet = data[offset:offset + incl_len].tobytes()
         offset += incl_len
-        ptype = packet[0]
-        payload = packet[1:] if len(packet) > 1 else b""
+        decoded = _decode_packet(datalink, flags, packet)
+        if decoded is None:
+            continue
+        ptype, direction, payload, adapter = decoded
 
         try:
             ts = _ts_from_btsnoop(timestamp)
@@ -153,7 +182,6 @@ def iter_records(
             first_ts = ts
         delta = (ts - first_ts).total_seconds() if first_ts else 0.0
 
-        direction = "RX" if (flags & 0x1) else "TX"
         record: MutableMapping[str, object] = {
             "index": index,
             "timestamp": ts,
@@ -169,6 +197,7 @@ def iter_records(
             "captured_length": incl_len,
             "flags": flags,
             "drops": drops,
+            "adapter": adapter,  # controller index; only btmon captures can hold more than one
         }
         yield record
 
