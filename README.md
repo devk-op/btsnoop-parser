@@ -165,16 +165,19 @@ Full API reference: **[btsnoop-parser.readthedocs.io](https://btsnoop-parser.rea
 ## Local LLM analysis (`--ai`)
 
 `--ai` gives a local model a plain-text summary of the capture (connection history,
-detected issues, routine failures, and a short note on each status code involved) and
-asks whether anything actually failed, and if so what, when and why. The model never
-sees raw packets, and nothing leaves your machine.
+detected issues, routine failures, a short note on each status code involved, and what
+each device did: music, buttons and volume, calls, LE Audio, sync, Android Auto) and asks
+whether anything actually failed, and if so what, when and why. When several things went
+wrong it leads with the one that stops the device working and lists the rest. The model
+never sees raw packets, and nothing leaves your machine.
 
 The default is [`Qwen/Qwen2.5-0.5B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct)
 with the [`kdonut/btsnoop-hci-qwen2.5-0.5b-lora`](https://huggingface.co/kdonut/btsnoop-hci-qwen2.5-0.5b-lora)
 adapter, trained on synthetic HCI sessions with the scripts in [`training/`](training/README.md).
-On 122 held-out sessions it gets 118 right; the same model without the adapter gets 1,
-and the three-times-larger `Qwen2.5-1.5B-Instruct` gets 27. Those sessions are synthetic,
-so expect lower accuracy on real captures.
+On 254 held-out sessions it gets 244 right (every single-problem and normal session, and
+30 of 40 sessions with two to four problems at once); the same model without the adapter
+gets 15. Those sessions are synthetic, so expect lower accuracy on real captures,
+and check details against `--report`.
 
 - `--base-model` takes a Hugging Face model id or a local model folder; `BTSNOOP_AI_MODEL`
   changes the default. The default adapter is only applied to the default model.
